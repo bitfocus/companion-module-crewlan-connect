@@ -1,0 +1,9 @@
+dist/
+pkg/
+node_modules/
+.pnp.*
+.yarn/
+!.yarn/releases/
+*.tsbuildinfo
+*.tgz
+*.zip

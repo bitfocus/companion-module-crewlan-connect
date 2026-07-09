@@ -1,0 +1,39 @@
+{
+  "$schema": "../node_modules/@companion-module/base/assets/manifest.schema.json",
+  "type": "connection",
+  "id": "crewlan-connect",
+  "name": "CrewLAN Connect",
+  "shortname": "CrewLAN",
+  "description": "Control CrewLAN statuses, alerts, and Shoutbox live controls.",
+  "version": "0.0.0",
+  "license": "MIT",
+  "repository": "git+https://github.com/bitfocus/companion-module-crewlan-connect.git",
+  "bugs": "https://github.com/bitfocus/companion-module-crewlan-connect/issues",
+  "maintainers": [
+    {
+      "name": "Jonas Zitzmann",
+      "email": "info@jonaszitzmann.de",
+      "github": "jonaszitzmann"
+    }
+  ],
+  "runtime": {
+    "type": "node22",
+    "api": "nodejs-ipc",
+    "apiVersion": "0.0.0",
+    "entrypoint": "../dist/main.js"
+  },
+  "legacyIds": [
+    "crewlan-v1"
+  ],
+  "manufacturer": "CrewLAN",
+  "products": [
+    "CrewLAN Connect"
+  ],
+  "keywords": [
+    "status",
+    "alerts",
+    "shoutbox",
+    "stream deck",
+    "public api"
+  ]
+}
