@@ -107,7 +107,8 @@ export interface PublicEntityControlsDto {
 			active: boolean
 			live: boolean
 			controlMode: 'push' | 'latch' | null
-			latchedPreference: boolean
+			/** Not validated and unread; CrewLAN, not Companion, remembers the operator's latch choice. */
+			latchedPreference?: boolean
 			available: boolean
 		}
 	}
