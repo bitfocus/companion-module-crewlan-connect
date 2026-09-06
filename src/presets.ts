@@ -12,7 +12,8 @@ const listenMutedColor = 0xcf2929
 export function UpdatePresets(self: ModuleInstance): void {
 	const selectableStatuses = self.getSelectableStatuses()
 	const presets: CompanionPresetDefinitions<ModuleSchema> = {}
-	// The preset id namespaces cannot collide as long as no status id starts with "macro_".
+	// The "status_"/"macro_" prefixes keep the generated ids apart from each other and from the
+	// fixed ids below, whatever CrewLAN names a status or a macro.
 	const statusPresetIds: string[] = []
 	const macroPresetIds: string[] = []
 

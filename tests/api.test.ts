@@ -454,7 +454,9 @@ describe('CrewLAN API client event stream', () => {
 
 	it('survives a handler that throws and keeps reading', async () => {
 		const logger = createLogger()
-		const received: string[] = []
+		// The envelope id is optional (no guard checks it), so a frame that lost its id shows up as
+		// undefined here and fails the assertion below rather than being silently coerced away.
+		const received: (string | undefined)[] = []
 
 		await withFetch(
 			async () =>

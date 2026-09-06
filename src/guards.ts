@@ -15,9 +15,14 @@ import type {
 /**
  * Narrow runtime guards for every CrewLAN Public API payload the module consumes.
  *
- * Only the fields the module actually reads are checked, so a newer CrewLAN that adds
- * fields still validates. A payload that fails a guard is rejected at the API boundary
- * instead of throwing a TypeError later inside a feedback or variable callback.
+ * Only the fields the module needs are checked, so a newer CrewLAN that adds fields still
+ * validates. A payload that fails a guard is rejected at the API boundary instead of throwing a
+ * TypeError later inside a feedback or variable callback.
+ *
+ * The checks here and the optionality in `types.ts` are two halves of one statement: a field this
+ * file does not check is declared optional there, so the compiler makes every reader handle its
+ * absence. Tightening a guard therefore means making the matching field required, and dropping a
+ * check means making it optional.
  */
 
 export type Guard<T> = (value: unknown) => value is T
