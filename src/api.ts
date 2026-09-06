@@ -26,15 +26,8 @@ import type {
 	PublicWorkspaceDto,
 } from './types.js'
 
-/**
- * Default deadline for a single REST request.
- *
- * Companion abandons an action after 5 s, and the longest action (set status) makes two calls,
- * so a single request must stay well below that budget.
- */
-export const defaultRequestTimeoutMs = 3000
-/** Deadline for the best-effort re-read that follows a successful write. */
-export const defaultReadBackTimeoutMs = 1500
+/** Default deadline for a single REST request, as required of the CrewLAN API. */
+export const defaultRequestTimeoutMs = 5000
 /** Deadline for reading an error body; a stalled error body must not hang the caller. */
 export const errorBodyTimeoutMs = 1000
 /** Default deadline for receiving the response headers of the event stream. */
@@ -97,8 +90,10 @@ export interface CrewLanApiLogger {
 export interface CrewLanApiClientOptions {
 	baseUrl: string
 	token: string
-	/** Deadline for REST requests; also used for the event-stream handshake. */
+	/** Deadline for REST requests. */
 	timeoutMs?: number
+	/** Deadline for the event-stream handshake. Defaults to max(timeoutMs, 10 s). */
+	streamConnectTimeoutMs?: number
 	logger?: CrewLanApiLogger
 }
 
@@ -363,7 +358,7 @@ export class CrewLanApiClient {
 		this.token = options.token.trim()
 		this.timeoutMs = options.timeoutMs ?? defaultRequestTimeoutMs
 		this.streamConnectTimeoutMs =
-			options.timeoutMs === undefined ? defaultStreamConnectTimeoutMs : Math.max(options.timeoutMs, 1)
+			options.streamConnectTimeoutMs ?? Math.max(this.timeoutMs, defaultStreamConnectTimeoutMs)
 		this.logger = options.logger ?? silentLogger
 
 		if (this.token.length === 0) {
@@ -412,10 +407,7 @@ export class CrewLanApiClient {
 		const selectedStatusId = isItemResponse(isSetEntityStatusAck)(response) ? response.data.selectedStatusId : statusId
 
 		try {
-			return {
-				selectedStatusId,
-				status: await this.getEntityStatus(entityId, { ...options, timeoutMs: defaultReadBackTimeoutMs }),
-			}
+			return { selectedStatusId, status: await this.getEntityStatus(entityId, options) }
 		} catch (error) {
 			if (isAbortError(error)) {
 				throw error

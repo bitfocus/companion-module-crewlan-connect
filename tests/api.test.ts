@@ -68,11 +68,16 @@ function requestUrl(input: string | URL | Request): string {
 	return input instanceof Request ? input.url : String(input)
 }
 
-function createClient(logger?: CrewLanApiLogger, timeoutMs?: number): CrewLanApiClient {
+function createClient(
+	logger?: CrewLanApiLogger,
+	timeoutMs?: number,
+	streamConnectTimeoutMs?: number,
+): CrewLanApiClient {
 	return new CrewLanApiClient({
 		baseUrl: 'http://127.0.0.1:4848',
 		token: 'cle_test-token',
 		...(timeoutMs === undefined ? {} : { timeoutMs }),
+		...(streamConnectTimeoutMs === undefined ? {} : { streamConnectTimeoutMs }),
 		...(logger === undefined ? {} : { logger }),
 	})
 }
@@ -501,7 +506,7 @@ describe('CrewLAN API client event stream handshake', () => {
 					{ status: 200 },
 				),
 			async () =>
-				createClient(undefined, 200).streamEvents({
+				createClient(undefined, undefined, 200).streamEvents({
 					signal: controller.signal,
 					onEvent: (event) => received.push(event.type),
 				}),
@@ -515,7 +520,10 @@ describe('CrewLAN API client event stream handshake', () => {
 			async (_input, init) => fetchThatOnlyAborts(init),
 			async () => {
 				await assert.rejects(
-					createClient(undefined, 200).streamEvents({ signal: new AbortController().signal, onEvent: () => undefined }),
+					createClient(undefined, undefined, 200).streamEvents({
+						signal: new AbortController().signal,
+						onEvent: () => undefined,
+					}),
 					(error: unknown) => error instanceof CrewLanApiError && error.kind === 'timeout',
 				)
 			},

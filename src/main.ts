@@ -39,15 +39,18 @@ export const reconnectBackoffBaseMs = 1000
 export const reconnectBackoffMaxMs = 30_000
 /** Retry cadence for failures that need a config change to recover (bad address, rejected token). */
 export const nonRecoverableRetryDelayMs = 60_000
-/**
- * Talk release retry budget. Companion aborts any action after 5 s, so the whole sequence
- * (3 × 1200 ms deadlines + 200 ms + 400 ms pauses = 4.2 s) must finish inside that window.
- */
 /** How long `last_alert` keeps reporting an alert that was never dismissed. */
 export const alertRetentionMs = 5 * 60 * 1000
+/**
+ * Talk release retry budget.
+ *
+ * The worst case is three attempts of 2000 ms plus 1250 ms of pauses, which outlasts the 5 s after
+ * which Companion stops waiting for an action. That is accepted deliberately: a lost release
+ * leaves a live microphone behind a button that already looks idle.
+ */
 export const talkReleaseAttempts = 3
-export const talkReleaseTimeoutMs = 1200
-const talkReleaseRetryDelaysMs = [200, 400]
+export const talkReleaseTimeoutMs = 2000
+const talkReleaseRetryDelaysMs = [250, 1000]
 
 export const authenticationFailedConnectionMessage = 'Could not establish a connection because authentication failed.'
 
@@ -1096,7 +1099,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 
 		for (let attempt = 0; attempt < talkReleaseAttempts; attempt++) {
 			if (attempt > 0) {
-				await delay(talkReleaseRetryDelaysMs[attempt - 1] ?? 400, signal)
+				await delay(talkReleaseRetryDelaysMs[attempt - 1] ?? 1000, signal)
 			}
 
 			// The connection was replaced or the module was destroyed while waiting: the device state

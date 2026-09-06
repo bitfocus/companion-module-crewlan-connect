@@ -379,7 +379,8 @@ describe('module against a CrewLAN stub', () => {
 		const startedAt = Date.now()
 		await host.actions.talk_push_up?.callback({ options: {} })
 		assert.equal(stub.controls.shoutbox.talk.active, false)
-		assert.ok(Date.now() - startedAt < 5000, 'talk release must finish inside Companion’s 5 s action budget')
+		// A release that succeeds first time must not spend any of its retry budget.
+		assert.ok(Date.now() - startedAt < 1000, 'a successful release returns immediately')
 	})
 
 	it('runs the remaining write actions', async () => {
