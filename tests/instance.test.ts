@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { after, describe, it } from 'node:test'
+import { after, before, describe, it } from 'node:test'
 import { setTimeout as sleep } from 'node:timers/promises'
 import ModuleInstance from '../src/main.js'
 import type { PublicEntityControlsDto, PublicEntityStatusDto, PublicStatusDto } from '../src/types.js'
@@ -239,19 +239,39 @@ function createHost(): Host {
 	return host
 }
 
-describe('module against a CrewLAN stub', async () => {
-	const stub = await startCrewLanStub()
-	const host = createHost()
+/** Poll a condition instead of sleeping, so a loaded CI runner cannot turn timing into failure. */
+async function waitFor(condition: () => boolean, what: string, timeoutMs = 15000): Promise<void> {
+	const deadline = Date.now() + timeoutMs
+
+	while (Date.now() < deadline) {
+		if (condition()) {
+			return
+		}
+
+		await sleep(20)
+	}
+
+	assert.fail(`timed out waiting for ${what}`)
+}
+
+describe('module against a CrewLAN stub', () => {
+	let stub: Stub
+	let host: Host
+
+	before(async () => {
+		stub = await startCrewLanStub()
+		host = createHost()
+		await host.instance.init({ baseUrl: `http://127.0.0.1:${String(stub.port)}`, pollIntervalMs: 1000 }, true, {
+			entityToken: 'cle_test',
+		})
+		await waitFor(() => host.status === 'ok', 'the connection to report ok')
+		await waitFor(() => host.variables.event_stream_connected === true, 'the event stream to connect')
+	})
 
 	after(async () => {
 		await host.instance.destroy()
 		await stub.close()
 	})
-
-	await host.instance.init({ baseUrl: `http://127.0.0.1:${String(stub.port)}`, pollIntervalMs: 1000 }, true, {
-		entityToken: 'cle_test',
-	})
-	await sleep(400)
 
 	it('registers its full Companion surface', () => {
 		assert.equal(host.registered.actions.length, 7)
@@ -271,6 +291,8 @@ describe('module against a CrewLAN stub', async () => {
 	})
 
 	it('opens and closes the talk channel well inside the action budget', async () => {
+		assert.ok(host.actions.talk_push_down, 'actions are registered')
+
 		await host.actions.talk_push_down?.callback({ options: {} })
 		assert.equal(stub.controls.shoutbox.talk.active, true)
 		assert.equal(host.variables.talk_active, true)
@@ -312,9 +334,7 @@ describe('module against a CrewLAN stub', async () => {
 				data: controls,
 			})}\n\n`,
 		)
-		await sleep(200)
-
-		assert.equal(host.variables.talk_live, true)
+		await waitFor(() => host.variables.talk_live === true, 'the controls event to be applied')
 
 		const lastCheck = host.checked.at(-1) ?? []
 		assert.ok(lastCheck.includes('talk_live'), 'controls feedbacks are rechecked')
@@ -332,7 +352,7 @@ describe('module against a CrewLAN stub', async () => {
 				data: { scope: 'workspace', targetEntityIds: null },
 			})}\n\n`,
 		)
-		await sleep(150)
+		await waitFor(() => host.variables.last_alert !== '', 'the alert event to be applied')
 		assert.equal(host.variables.last_alert, 'Workspace alert at 2026-08-03T19:00:00.000Z')
 
 		const frame = `id: 11\nevent: status.changed\ndata: ${JSON.stringify({
@@ -351,28 +371,23 @@ describe('module against a CrewLAN stub', async () => {
 		stub.stream?.write(frame.slice(0, 30))
 		await sleep(60)
 		stub.stream?.write(frame.slice(30))
-		await sleep(200)
-
-		assert.equal(host.variables.current_status_id, 'sys-green')
+		await waitFor(() => host.variables.current_status_id === 'sys-green', 'the split frame to be applied')
 	})
 
 	it('notices a stream the server closed and keeps working', async () => {
 		const callsBefore = stub.calls.length
 		stub.stream?.end()
 		stub.stream = null
-		await sleep(1500)
 
-		assert.ok(stub.calls.length > callsBefore, 'polling continues after the stream closed')
-		assert.ok(
-			host.logs.some((line) => /event stream/iu.test(line)),
-			'the lost stream is reported',
-		)
+		await waitFor(() => stub.calls.length > callsBefore, 'polling to continue after the stream closed')
+		await waitFor(() => host.logs.some((line) => /event stream/iu.test(line)), 'the lost stream to be reported')
 	})
 
 	it('makes no further requests after destroy', async () => {
 		await host.instance.destroy()
 		const callsAtDestroy = stub.calls.length
-		await sleep(1600)
+		// More than one poll interval: a leaked timer would have fired by now.
+		await sleep(2500)
 
 		assert.equal(stub.calls.length, callsAtDestroy)
 	})

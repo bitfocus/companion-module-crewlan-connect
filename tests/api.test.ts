@@ -237,9 +237,9 @@ describe('CrewLAN API client requests', () => {
 				}),
 			async () => {
 				await assert.rejects(
-					createClient(undefined, 30).getSession(),
+					createClient(undefined, 200).getSession(),
 					(error: unknown) =>
-						error instanceof CrewLanApiError && error.kind === 'timeout' && /30 ms/u.test(error.message),
+						error instanceof CrewLanApiError && error.kind === 'timeout' && /200 ms/u.test(error.message),
 				)
 			},
 		)
@@ -428,7 +428,7 @@ describe('CrewLAN API client event stream', () => {
 				await assert.rejects(
 					createClient().streamEvents({
 						signal: new AbortController().signal,
-						idleTimeoutMs: 30,
+						idleTimeoutMs: 200,
 						onEvent: () => undefined,
 					}),
 					(error: unknown) => error instanceof CrewLanApiError && error.kind === 'timeout',
@@ -475,6 +475,7 @@ describe('CrewLAN API client event stream handshake', () => {
 		const controller = new AbortController()
 		const encoder = new TextEncoder()
 
+		// The body arrives well after the handshake deadline: it may only govern the handshake.
 		await withFetch(
 			async () =>
 				new Response(
@@ -483,13 +484,13 @@ describe('CrewLAN API client event stream handshake', () => {
 							setTimeout(() => {
 								streamController.enqueue(encoder.encode(eventFrame('status.changed', entityStatus)))
 								streamController.close()
-							}, 60)
+							}, 600)
 						},
 					}),
 					{ status: 200 },
 				),
 			async () =>
-				createClient(undefined, 20).streamEvents({
+				createClient(undefined, 200).streamEvents({
 					signal: controller.signal,
 					onEvent: (event) => received.push(event.type),
 				}),
@@ -506,7 +507,7 @@ describe('CrewLAN API client event stream handshake', () => {
 				}),
 			async () => {
 				await assert.rejects(
-					createClient(undefined, 20).streamEvents({ signal: new AbortController().signal, onEvent: () => undefined }),
+					createClient(undefined, 200).streamEvents({ signal: new AbortController().signal, onEvent: () => undefined }),
 					(error: unknown) => error instanceof CrewLanApiError && error.kind === 'timeout',
 				)
 			},
