@@ -28,13 +28,54 @@ yarn package         # build the distributable .tgz with companion-module-build
 
 `yarn format` formats the repository with the shared Bitfocus Prettier config, and commits run `lint-staged` through a Husky pre-commit hook.
 
-`scripts/module-version.mjs` holds this project's own release-naming rules (public two-number versions, CrewLAN download tags). It is repository tooling for the external release process, is never packaged into the module, and is covered by `tests/versioning.test.ts`.
+`scripts/module-version.mjs` derives the release tag and the release asset name from the version in `package.json`. It is repository tooling, is never packaged into the module, and is covered by `tests/versioning.test.ts`. Why it exists at all is explained next.
+
+### Why there is a second distribution channel
+
+The Bitfocus module store is the intended channel for this module. Until the module is approved and
+ships with Companion, CrewLAN users still need a way to install it, so every release is also
+published as the `.tgz` that `yarn package` produces, for manual import into Companion.
+
+**Both channels carry the same version number.** The full SemVer in `package.json` is the only
+version written by hand anywhere in this repository:
+
+- `companion-module-build` stamps it into `companion/manifest.json`, which is why the checked-in
+  manifest keeps the `0.0.0` placeholder — there is no second number that could drift.
+- the git tag is `v<version>`, matching the tags this repository already carries.
+- the downloadable asset is `crewlan-connect-<version>.tgz`, which is the file `yarn package`
+  emits, so nothing is renamed on the way to the download page.
+
+`module-version.mjs` reads that number out of `package.json` instead of taking it as an argument,
+so a release cannot be tagged or published under a version that differs from the one Companion
+reports:
+
+```sh
+node scripts/module-version.mjs read-package-version   # 1.4.1
+node scripts/module-version.mjs release-tag            # v1.4.1
+node scripts/module-version.mjs package-asset          # crewlan-connect-1.4.1.tgz
+node scripts/module-version.mjs set-package-version 1.5.0
+```
+
+This is a stopgap, not a parallel product. Once the module is released in the store, the store
+becomes the only channel users are pointed at, and this tooling can be retired.
 
 ## Deviations from the module template
 
 The repository is the Bitfocus TypeScript module template. `.gitattributes`, `.prettierignore`,
-`.gitignore`, `.yarnrc.yml`, `tsconfig.json` and every `package.json` field the template defines are
-unchanged. Two files differ on purpose, and this is why:
+`.gitignore`, `.yarnrc.yml` and `tsconfig.json` are unchanged.
+
+`package.json` keeps every field, script and `lint-staged` rule the template defines. Beyond this
+module's own name, version and repository URL, three entries differ on purpose:
+
+- `@companion-module/base` is `~2.0.4`, where the template pins the exact `2.0.4`. The range picks
+  up a framework patch release without a commit here and cannot cross into `2.1`.
+- `eslint` is `^10.2.0`, where the template is still on `^9.39.4`. The shared
+  `@companion-module/tools` config runs on the ESLint 10 line without changes and `yarn lint` is
+  clean on it.
+- `check:types` and `test` scripts and the `tsx` devDependency are additions for the test suite,
+  which the template does not ship.
+
+Two config files differ as well, and this is why:
 
 - **`tsconfig.build.json`** adds `exactOptionalPropertyTypes` and `noUncheckedIndexedAccess`. The
   first is **required, not a preference**: `ModuleConfig` has an optional field for the legacy token
