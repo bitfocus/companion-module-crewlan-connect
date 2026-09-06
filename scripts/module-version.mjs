@@ -1,55 +1,55 @@
+/**
+ * Release naming for the interim CrewLAN distribution channel.
+ *
+ * The Bitfocus module store is the intended channel for this module. Until it is approved and ships
+ * with Companion, CrewLAN users still need a way to install it, so every release is also published
+ * as the .tgz that `yarn package` produces, for manual import into Companion.
+ *
+ * There is exactly one version number, and both channels use it: the full SemVer in package.json.
+ * `companion-module-build` stamps it into companion/manifest.json, the git tag is `v<version>`, and
+ * the asset is `crewlan-connect-<version>.tgz`. The commands below read that number out of
+ * package.json rather than taking it as an argument, so a release cannot be tagged or published
+ * under a version that differs from the one Companion reports.
+ *
+ * This is repository tooling only: it is never packaged into the module, and it can be retired once
+ * the module is available in the store.
+ */
 import { readFileSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
-const fullSemverPattern = /^[0-9]+\.[0-9]+\.[0-9]+$/u
-const publicVersionPattern = /^[0-9]+\.[0-9]+$/u
+const moduleVersionPattern = /^[0-9]+\.[0-9]+\.[0-9]+$/u
 
-export function assertFullSemver(version) {
-	if (!fullSemverPattern.test(version)) {
-		throw new Error(`Version must be full SemVer like 1.2.3: ${version}`)
+export function assertModuleVersion(version) {
+	if (!moduleVersionPattern.test(version)) {
+		throw new Error(`Module version must be full SemVer like 1.2.3: ${version}`)
 	}
 
 	return version
 }
 
-export function assertPublicVersion(version) {
-	if (!publicVersionPattern.test(version)) {
-		throw new Error(`Public version must look like 1.2: ${version}`)
-	}
-
-	return version
+/** The git tag for a release, in the form this repository already uses (v1.4.1). */
+export function releaseTag(version) {
+	return `v${assertModuleVersion(version)}`
 }
 
-export function publicPackageVersion(publicVersion) {
-	return `${assertPublicVersion(publicVersion)}.0`
-}
-
-export function publicPackageAsset(publicVersion) {
-	return `crewlan-connect-companion-${assertPublicVersion(publicVersion)}.tgz`
-}
-
-export function publicDownloadTag(publicVersion) {
-	return `crewlan-connect-public-v${assertPublicVersion(publicVersion)}`
-}
-
-export function internalReleaseTag(internalVersion) {
-	return `companion-v${assertFullSemver(internalVersion)}`
-}
-
-export function nextInternalVersion(publicVersion) {
-	const [major, minor] = assertPublicVersion(publicVersion).split('.').map(Number)
-	return `${major}.${minor + 1}.1`
+/** The .tgz `yarn package` emits, which is also the asset the interim channel offers for download. */
+export function packageAsset(version) {
+	return `crewlan-connect-${assertModuleVersion(version)}.tgz`
 }
 
 export function readPackageVersion(packagePath = 'package.json') {
 	const packageJson = JSON.parse(readFileSync(packagePath, 'utf8'))
-	return assertFullSemver(String(packageJson.version))
+	return assertModuleVersion(String(packageJson.version))
 }
 
+/**
+ * package.json is tab-indented and listed in .prettierignore, so nothing reformats it afterwards.
+ * Writing it back with spaces would turn a one-line version bump into a whole-file diff.
+ */
 export function writePackageVersion(version, packagePath = 'package.json') {
 	const packageJson = JSON.parse(readFileSync(packagePath, 'utf8'))
-	packageJson.version = assertFullSemver(version)
-	writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`)
+	packageJson.version = assertModuleVersion(version)
+	writeFileSync(packagePath, `${JSON.stringify(packageJson, null, '\t')}\n`)
 }
 
 function print(value) {
@@ -60,20 +60,11 @@ function main() {
 	const [, , command, value, packagePath = 'package.json'] = process.argv
 
 	switch (command) {
-		case 'public-package-version':
-			print(publicPackageVersion(String(value ?? '')))
+		case 'release-tag':
+			print(releaseTag(readPackageVersion(value ?? packagePath)))
 			return
-		case 'public-package-asset':
-			print(publicPackageAsset(String(value ?? '')))
-			return
-		case 'public-download-tag':
-			print(publicDownloadTag(String(value ?? '')))
-			return
-		case 'internal-release-tag':
-			print(internalReleaseTag(String(value ?? '')))
-			return
-		case 'next-internal-version':
-			print(nextInternalVersion(String(value ?? '')))
+		case 'package-asset':
+			print(packageAsset(readPackageVersion(value ?? packagePath)))
 			return
 		case 'read-package-version':
 			print(readPackageVersion(value ?? packagePath))

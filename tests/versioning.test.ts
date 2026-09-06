@@ -1,32 +1,26 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import {
-	assertFullSemver,
-	assertPublicVersion,
-	internalReleaseTag,
-	nextInternalVersion,
-	publicDownloadTag,
-	publicPackageAsset,
-	publicPackageVersion,
-} from '../scripts/module-version.mjs'
+import { assertModuleVersion, packageAsset, readPackageVersion, releaseTag } from '../scripts/module-version.mjs'
 
 describe('Companion module versioning', () => {
-	it('maps public versions to package SemVer and download assets', () => {
-		assert.equal(publicPackageVersion('1.2'), '1.2.0')
-		assert.equal(publicPackageAsset('1.2'), 'crewlan-connect-companion-1.2.tgz')
-		assert.equal(publicDownloadTag('1.2'), 'crewlan-connect-public-v1.2')
+	it('names the release tag and the interim-channel asset after the module version', () => {
+		assert.equal(releaseTag('1.4.1'), 'v1.4.1')
+		assert.equal(packageAsset('1.4.1'), 'crewlan-connect-1.4.1.tgz')
 	})
 
-	it('calculates the next internal development line', () => {
-		assert.equal(nextInternalVersion('1.2'), '1.3.1')
+	it('gives the interim channel the same version number as the module itself', () => {
+		// package.json is the only place a version is written by hand; companion-module-build copies
+		// it into the manifest (tests/manifest.test.ts pins the 0.0.0 placeholder that proves there is
+		// no second number to drift from).
+		const version = readPackageVersion('package.json')
+
+		assert.equal(releaseTag(version), `v${version}`)
+		assert.equal(packageAsset(version), `crewlan-connect-${version}.tgz`)
 	})
 
-	it('keeps internal release tags on full SemVer', () => {
-		assert.equal(internalReleaseTag('1.2.102'), 'companion-v1.2.102')
-	})
-
-	it('rejects invalid public and internal versions', () => {
-		assert.throws(() => assertPublicVersion('1.2.0'))
-		assert.throws(() => assertFullSemver('1.2'))
+	it('rejects anything that is not a full SemVer module version', () => {
+		assert.throws(() => assertModuleVersion('1.2'))
+		assert.throws(() => assertModuleVersion('v1.2.3'))
+		assert.throws(() => assertModuleVersion('1.2.3-beta'))
 	})
 })
