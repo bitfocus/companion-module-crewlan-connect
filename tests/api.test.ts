@@ -147,6 +147,25 @@ describe('CrewLAN API client helpers', () => {
 		assert.throws(() => normalizeBaseUrl('ftp://crewlan.local'), /http:\/\/ or https:\/\//u)
 	})
 
+	it('reports an unusable address or a missing token as a configuration error', () => {
+		// The kind matters: it is what keeps the module from retrying something only the operator can fix.
+		for (const address of ['', 'not a url', 'ftp://crewlan.local']) {
+			assert.throws(
+				() => normalizeBaseUrl(address),
+				(error: unknown) => error instanceof CrewLanApiError && error.kind === 'config',
+				`address ${JSON.stringify(address)}`,
+			)
+		}
+
+		assert.throws(
+			() => new CrewLanApiClient({ baseUrl: 'http://127.0.0.1:4848', token: '   ' }),
+			(error: unknown) =>
+				error instanceof CrewLanApiError &&
+				error.kind === 'config' &&
+				/Connection token is required/u.test(error.message),
+		)
+	})
+
 	it('parses complete server-sent events and ignores comments', () => {
 		const events = parseServerSentEvents(
 			[

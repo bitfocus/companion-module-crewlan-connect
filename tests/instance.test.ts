@@ -620,3 +620,45 @@ describe('module against a CrewLAN without macro support', () => {
 		)
 	})
 })
+
+describe('module started without a connection token', () => {
+	let stub: Stub
+	let host: Host
+
+	before(async () => {
+		stub = await startCrewLanStub()
+		host = createHost()
+		await host.instance.init({ baseUrl: `http://127.0.0.1:${String(stub.port)}`, pollIntervalMs: 1000 }, true, {})
+		await waitFor(() => host.status === 'bad_config', 'the connection to report a bad configuration')
+	})
+
+	after(async () => {
+		await host.instance.destroy()
+		await stub.close()
+	})
+
+	it('names the setting to fill in instead of blaming the token', () => {
+		assert.ok(
+			host.logs.some((line) => line.startsWith('status:bad_config') && /Connection token is required/u.test(line)),
+			'the connection list says which setting is missing',
+		)
+	})
+
+	it('leaves an unusable configuration alone instead of retrying it', async () => {
+		const settledLogs = host.logs.length
+		// Longer than the backoff a recoverable failure would use: nothing may keep re-reporting a
+		// problem that only a config change can fix.
+		await sleep(1200)
+
+		assert.equal(host.logs.length, settledLogs, 'no retry repeats the same complaint')
+		assert.deepEqual(stub.calls, [], 'an unconfigured connection sends nothing to CrewLAN')
+	})
+
+	it('connects as soon as the token is entered', async () => {
+		await host.instance.configUpdated(
+			{ baseUrl: `http://127.0.0.1:${String(stub.port)}`, pollIntervalMs: 1000 },
+			{ entityToken: 'cle_test' },
+		)
+		await waitFor(() => host.status === 'ok', 'the connection to come up once the token is entered')
+	})
+})

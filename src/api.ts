@@ -63,7 +63,9 @@ export type CrewLanApiErrorKind =
 	| 'aborted'
 	/** The server answered 2xx but the body was not what the module expects. */
 	| 'invalid-response'
-	/** A client-side precondition failed (bad address, missing token, ...). */
+	/** This connection's own configuration is unusable: no token, or an address that is not a URL. */
+	| 'config'
+	/** A client-side precondition failed (not connected yet, unusable token grants, ...). */
 	| 'client'
 
 export class CrewLanApiError extends Error {
@@ -151,7 +153,7 @@ export function normalizeBaseUrl(value: string): string {
 	const trimmed = value.trim()
 
 	if (trimmed.length === 0) {
-		throw new CrewLanApiError('Address is required.')
+		throw new CrewLanApiError('Address is required.', null, 'config')
 	}
 
 	let url: URL
@@ -159,11 +161,15 @@ export function normalizeBaseUrl(value: string): string {
 	try {
 		url = new URL(trimmed)
 	} catch {
-		throw new CrewLanApiError('Address must be a valid CrewLAN URL, for example http://192.168.1.20:4848.')
+		throw new CrewLanApiError(
+			'Address must be a valid CrewLAN URL, for example http://192.168.1.20:4848.',
+			null,
+			'config',
+		)
 	}
 
 	if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-		throw new CrewLanApiError('Address must start with http:// or https://.')
+		throw new CrewLanApiError('Address must start with http:// or https://.', null, 'config')
 	}
 
 	// Credentials embedded in the address would otherwise end up in every request URL and log line.
@@ -380,7 +386,7 @@ export class CrewLanApiClient {
 		this.logger = options.logger ?? silentLogger
 
 		if (this.token.length === 0) {
-			throw new CrewLanApiError('CrewLAN entity token is required.')
+			throw new CrewLanApiError('Connection token is required.', null, 'config')
 		}
 	}
 

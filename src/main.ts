@@ -37,7 +37,7 @@ export const streamHealthyPollIntervalMs = 30_000
 export const eventStreamIdleTimeoutMs = 45_000
 export const reconnectBackoffBaseMs = 1000
 export const reconnectBackoffMaxMs = 30_000
-/** Retry cadence for failures that need a config change to recover (bad address, rejected token). */
+/** Retry cadence for failures only CrewLAN itself can clear (a rejected token, a 400/404 answer). */
 export const nonRecoverableRetryDelayMs = 60_000
 /** How long `last_alert` keeps reporting an alert that was never dismissed. */
 export const alertRetentionMs = 5 * 60 * 1000
@@ -123,6 +123,10 @@ export function statusForError(error: unknown): InstanceStatus {
 			return InstanceStatus.ConnectionFailure
 		}
 
+		if (error.kind === 'config') {
+			return InstanceStatus.BadConfig
+		}
+
 		if (error.kind === 'network' || error.kind === 'timeout' || error.kind === 'invalid-response') {
 			return InstanceStatus.ConnectionFailure
 		}
@@ -165,6 +169,16 @@ export function isConnectionLevelError(error: unknown): boolean {
 	}
 
 	return error instanceof Error && !isAbortError(error)
+}
+
+/**
+ * Whether the connection failed on its own configuration — no token, or an address that is not a
+ * URL — rather than on anything CrewLAN said. Such a failure happens before the first request and
+ * cannot change until the operator edits the connection, so it is reported as a bad configuration
+ * and then left alone.
+ */
+export function isConfigurationError(error: unknown): boolean {
+	return error instanceof CrewLanApiError && error.kind === 'config'
 }
 
 function isNonRecoverableStatus(status: InstanceStatus): boolean {
@@ -629,7 +643,14 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 
 			this.api = null
 			this.handleConnectionError(error)
-			this.scheduleReconnect(error)
+
+			// A timer cannot fix an unusable configuration, and Companion calls configUpdated() as soon
+			// as the operator corrects it, which rebuilds the connection anyway. Retrying would only
+			// repeat the same warning in the log for as long as the connection stays unconfigured.
+			if (!isConfigurationError(error)) {
+				this.scheduleReconnect(error)
+			}
+
 			return
 		}
 

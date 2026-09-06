@@ -63,8 +63,11 @@ comparing it against the text `true`.
 exactly one entity. The connection list deliberately shows only a generic message so a token can
 never appear on a wall-mounted surface; the specific reason is in the connection's log.
 
-**The connection says "Bad configuration".** CrewLAN answered 400 or 404. Check the Address: it
-must be the CrewLAN host, not a page inside it.
+**The connection says "Bad configuration".** Either the connection is not filled in yet — the
+status line then names the setting, for example `Connection token is required.` — or CrewLAN
+answered 400 or 404, in which case the Address is wrong: it must be the CrewLAN host, not a page
+inside it. A connection that is only missing its settings is not retried in the background; it
+comes up as soon as you save them.
 
 **The connection says "Connection failure".** CrewLAN could not be reached, answered too slowly, or
 sent something that is not the Public API. The module keeps retrying by itself, backing off to one
