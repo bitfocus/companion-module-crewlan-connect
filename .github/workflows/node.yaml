@@ -57,6 +57,11 @@ jobs:
           yarn install
         env:
           CI: true
+      - name: Check types of sources and tests
+        run: |
+          yarn check:types
+        env:
+          CI: true
       - name: Run tests
         run: |
           yarn test
