@@ -662,7 +662,7 @@ export class CrewLanApiClient {
 					setTimeout(() => {
 						void response.body?.cancel().catch(() => undefined)
 						reject(new Error('error body timed out'))
-					}, errorBodyTimeoutMs).unref?.()
+					}, errorBodyTimeoutMs)
 				}),
 			])
 

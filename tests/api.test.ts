@@ -47,6 +47,23 @@ async function withFetch<T>(mock: FetchMock, run: () => Promise<T>): Promise<T> 
 	}
 }
 
+/**
+ * A fetch that only settles once the request is aborted.
+ *
+ * The guard timer is deliberately ref'd: `AbortSignal.timeout()` does not keep the event loop
+ * alive, so without it Node would drain the loop while this promise is still pending and cancel
+ * the test run.
+ */
+async function fetchThatOnlyAborts(init?: RequestInit): Promise<Response> {
+	return new Promise<Response>((_resolve, reject) => {
+		const guard = setTimeout(() => reject(new Error('the fetch mock was never aborted')), 10000)
+		init?.signal?.addEventListener('abort', () => {
+			clearTimeout(guard)
+			reject(new DOMException('aborted', 'AbortError'))
+		})
+	})
+}
+
 function requestUrl(input: string | URL | Request): string {
 	return input instanceof Request ? input.url : String(input)
 }
@@ -231,10 +248,7 @@ describe('CrewLAN API client requests', () => {
 
 	it('times out requests that never answer', async () => {
 		await withFetch(
-			async (_input, init) =>
-				new Promise<Response>((_resolve, reject) => {
-					init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
-				}),
+			async (_input, init) => fetchThatOnlyAborts(init),
 			async () => {
 				await assert.rejects(
 					createClient(undefined, 200).getSession(),
@@ -249,10 +263,7 @@ describe('CrewLAN API client requests', () => {
 		const controller = new AbortController()
 
 		await withFetch(
-			async (_input, init) =>
-				new Promise<Response>((_resolve, reject) => {
-					init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
-				}),
+			async (_input, init) => fetchThatOnlyAborts(init),
 			async () => {
 				const pending = createClient().getSession({ signal: controller.signal })
 				controller.abort()
@@ -501,10 +512,7 @@ describe('CrewLAN API client event stream handshake', () => {
 
 	it('gives up on a handshake that never completes', async () => {
 		await withFetch(
-			async (_input, init) =>
-				new Promise<Response>((_resolve, reject) => {
-					init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
-				}),
+			async (_input, init) => fetchThatOnlyAborts(init),
 			async () => {
 				await assert.rejects(
 					createClient(undefined, 200).streamEvents({ signal: new AbortController().signal, onEvent: () => undefined }),
