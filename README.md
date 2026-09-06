@@ -61,8 +61,12 @@ becomes the only channel users are pointed at, and this tooling can be retired.
 
 ## Deviations from the module template
 
-The repository is the Bitfocus TypeScript module template. `.gitattributes`, `.prettierignore`,
-`.gitignore`, `.yarnrc.yml` and `tsconfig.json` are unchanged.
+The repository is the Bitfocus TypeScript module template. `.gitattributes`, `.prettierignore` and
+`.yarnrc.yml` carry no changes of substance — the latter two differ only where `yarn format`
+normalised them. Two more files differ by one edit each, both of them trivial but neither of them
+nothing: `.gitignore` keeps every template entry and appends a `# module-specific` section for
+`*.tsbuildinfo`, which is the shape review item C5 asked for, and `tsconfig.json` drops the
+template's commented-out `jest` hint from its `types` array.
 
 `package.json` keeps every field, script and `lint-staged` rule the template defines. Beyond this
 module's own name, version and repository URL, three entries differ on purpose:
@@ -88,10 +92,13 @@ Two config files differ as well, and this is why:
   imports. This is the shape the v1.1.0 module review asked for. The shared Bitfocus config stays
   the single source of rules for `src/`.
 
-Two files are additions rather than changes, so the template's own files stay intact:
-`tests/tsconfig.json` holds the type-check for the test suite, and
-`.github/workflows/node.yaml` enables the test job the template ships commented out and runs
-`yarn check:types` next to it.
+One file is an addition: `tests/tsconfig.json` holds the type-check for the test suite.
+
+`.github/workflows/node.yaml` is a template file this repository edits, in two ways. The
+commented-out test job is enabled and runs `yarn check:types` alongside `yarn test`, and the
+`Prepare Environment (For template repository)` step is removed — that step is guarded by
+`contains(github.repository, 'companion-module-template-')` and the template's own comment says to
+delete it in a real module.
 
 `LICENSE` carries the maintainer's copyright line instead of the template's. The licence text itself
 is the unmodified MIT text the manifest and `package.json` declare.

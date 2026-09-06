@@ -1333,7 +1333,8 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 
 	/**
 	 * Apply a state patch, publish variables, and re-check only the feedbacks whose inputs changed.
-	 * Definitions are re-registered only when the selectable status list changed.
+	 * Definitions are re-registered only when the definitions key changed, which covers the id, label
+	 * and colours of every selectable status and of every runnable macro.
 	 */
 	private updateState(patch: Partial<CrewLanState>): void {
 		const previous = this.state
