@@ -1066,6 +1066,13 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		}
 	}
 
+	/**
+	 * Record an alert that concerns this entity.
+	 *
+	 * A workspace alert carries no targets and reaches everyone. An entity alert without targets is
+	 * not something CrewLAN sends, but if it ever did it is counted as ours on purpose: announcing an
+	 * alert that was meant for somebody else is the harmless half of that mistake.
+	 */
 	private applyAlertEvent(occurredAt: string, scope: 'workspace' | 'entities', targetEntityIds: string[] | null): void {
 		const entityId = this.state.entityId
 		const targeted = targetEntityIds === null || (entityId !== null && targetEntityIds.includes(entityId))
