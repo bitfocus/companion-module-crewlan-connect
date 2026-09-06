@@ -10,15 +10,22 @@ import {
 	type ModuleSecrets,
 } from './config.js'
 import { UpdateFeedbacks, type FeedbacksSchema } from './feedbacks.js'
-import { isPublicAlertTriggeredEventData, isPublicEntityControlsDto, isPublicEntityStatusDto } from './guards.js'
+import {
+	isPublicAlertTriggeredEventData,
+	isPublicEntityControlsDto,
+	isPublicEntityStatusDto,
+	isPublicMacroDto,
+	isPublicMacroRemovedEventData,
+} from './guards.js'
 import { UpdatePresets } from './presets.js'
-import { getCompanionStatusLabel } from './status-labels.js'
+import { getCompanionStatusLabel } from './button-style.js'
 import type {
+	CrewLanChoice,
 	CrewLanState,
-	CrewLanStatusChoice,
 	PublicEntityControlsDto,
 	PublicEntityStatusDto,
 	PublicEventEnvelope,
+	PublicMacroDto,
 	PublicStatusDto,
 } from './types.js'
 import { UpgradeScripts } from './upgrades.js'
@@ -44,7 +51,7 @@ const talkReleaseRetryDelaysMs = [200, 400]
 
 export const authenticationFailedConnectionMessage = 'Could not establish a connection because authentication failed.'
 
-type StateGroup = 'connection' | 'status' | 'controls'
+type StateGroup = 'connection' | 'status' | 'controls' | 'macros'
 
 /**
  * Which slice of the state each feedback reads. Typed as an exhaustive record so a feedback added
@@ -64,6 +71,8 @@ const feedbackStateGroups: Record<keyof FeedbacksSchema, StateGroup> = {
 	talk_latch_active: 'controls',
 	talk_active: 'controls',
 	talk_live: 'controls',
+	macro_running: 'macros',
+	macro_style: 'macros',
 }
 
 export function feedbackIdsForGroups(groups: ReadonlySet<StateGroup>): (keyof FeedbacksSchema)[] {
@@ -80,6 +89,8 @@ function createInitialState(): CrewLanState {
 		workspace: null,
 		entity: null,
 		statuses: [],
+		macros: [],
+		macrosSupported: false,
 		status: null,
 		controls: null,
 		lastAlert: '',
@@ -274,7 +285,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	private lastLocalWriteAt = 0
 	/** When `state.controls` was last refreshed from the server. */
 	private controlsRefreshedAt = 0
-	private registeredStatusChoicesKey: string | null = null
+	private registeredDefinitionsKey: string | null = null
 	private instanceStatus: InstanceStatus | null = null
 	private instanceStatusMessage: string | null = null
 	private destroyed = false
@@ -328,7 +339,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 
 	/** Re-registers actions, feedbacks and presets; only needed when the selectable statuses change. */
 	updateDefinitions(): void {
-		this.registeredStatusChoicesKey = this.statusChoicesKey()
+		this.registeredDefinitionsKey = this.definitionsKey()
 		this.updateActions()
 		this.updateFeedbacks()
 		this.updatePresets()
@@ -342,7 +353,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		return this.state.statuses.filter((status) => status.selectable)
 	}
 
-	getStatusChoices(): CrewLanStatusChoice[] {
+	getStatusChoices(): CrewLanChoice[] {
 		const choices = this.getSelectableStatuses().map((status) => ({
 			id: status.id,
 			label: getCompanionStatusLabel(status),
@@ -357,6 +368,32 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 
 	getDefaultStatusChoice(): string {
 		return this.getStatusChoices()[0]?.id ?? ''
+	}
+
+	getRunnableMacros(): PublicMacroDto[] {
+		return this.state.macros
+			.filter((macro) => macro.runnable)
+			.sort(
+				(a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.label.localeCompare(b.label) || a.id.localeCompare(b.id),
+			)
+	}
+
+	getMacroChoices(): CrewLanChoice[] {
+		const choices = this.getRunnableMacros().map((macro) => ({ id: macro.id, label: macro.label }))
+
+		if (choices.length > 0) {
+			return choices
+		}
+
+		return [{ id: '', label: '— macro list not loaded —' }]
+	}
+
+	getDefaultMacroChoice(): string {
+		return this.getMacroChoices()[0]?.id ?? ''
+	}
+
+	isMacroRunning(macroId: string): boolean {
+		return macroId.length > 0 && this.state.macros.some((macro) => macro.id === macroId && macro.running)
 	}
 
 	// ---------------------------------------------------------------------------
@@ -430,6 +467,40 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		}
 
 		this.applyStatusUpdate(applied, this.lastLocalWriteAt, { lastError: '' })
+	}
+
+	/**
+	 * Start a macro. One-shot: CrewLAN answers with the updated macro, and a 409 for a macro that is
+	 * already running surfaces as an ordinary action failure without touching the connection.
+	 */
+	async runCrewLanMacro(macroId: string): Promise<void> {
+		const requestedId = macroId.trim()
+
+		if (requestedId.length === 0) {
+			this.log('warn', 'Run Macro: no macro selected. Pick one once the connection is up, or type a macro id.')
+			return
+		}
+
+		if (this.state.macros.length > 0 && !this.state.macros.some((macro) => macro.id === requestedId)) {
+			const known = this.getRunnableMacros()
+				.map((macro) => macro.id)
+				.join(', ')
+			this.log('warn', `Run Macro: CrewLAN has no macro with id "${requestedId}". Known ids: ${known}`)
+			return
+		}
+
+		const api = this.requireApi()
+		this.requireEntityId()
+		const generation = this.generation
+		const macro = await api.runMacro(requestedId, this.requestOptions())
+
+		if (generation !== this.generation) {
+			return
+		}
+
+		this.lastLocalWriteAt = Date.now()
+		this.applyMacroUpdate(macro, this.lastLocalWriteAt)
+		this.updateState({ lastError: '' })
 	}
 
 	async setListenMuteMode(mode: 'toggle' | 'on' | 'off'): Promise<void> {
@@ -589,12 +660,13 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			throw new CrewLanApiError('The token did not contain a CrewLAN entity id.')
 		}
 
-		const [workspace, entity, statuses, status, controls] = await Promise.all([
+		const [workspace, entity, statuses, status, controls, macros] = await Promise.all([
 			api.getWorkspace(options),
 			api.getEntity(entityId, options),
 			api.listStatuses(options),
 			api.getEntityStatus(entityId, options),
 			api.getEntityControls(entityId, options),
+			api.listMacros(options),
 		])
 
 		if (generation !== this.generation) {
@@ -614,6 +686,9 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			workspace,
 			entity,
 			statuses,
+			// The server's list membership and ordering win; only a per-macro payload can be held back.
+			macros: macros === null ? [] : this.mergeMacros(macros, requestedAt),
+			macrosSupported: macros !== null,
 			status: nextStatus,
 			controls: nextControls,
 			lastError: '',
@@ -817,6 +892,22 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 					this.log('debug', 'Ignoring entity.controls.changed event with an unexpected payload.')
 				}
 				return
+			case 'macro.changed':
+				if (isPublicMacroDto(event.data)) {
+					this.applyMacroUpdate(event.data, Date.now())
+				} else {
+					this.log('debug', 'Ignoring macro.changed event with an unexpected payload.')
+				}
+
+				return
+			case 'macro.removed':
+				if (isPublicMacroRemovedEventData(event.data)) {
+					this.removeMacro(event.data.id)
+				} else {
+					this.log('debug', 'Ignoring macro.removed event with an unexpected payload.')
+				}
+
+				return
 			case 'alert.triggered':
 				if (isPublicAlertTriggeredEventData(event.data)) {
 					this.applyAlertEvent(event.occurredAt, event.data.scope, event.data.targetEntityIds)
@@ -876,6 +967,36 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		}
 
 		this.updateState({ ...extra, controls: next })
+	}
+
+	/** Keep a macro the operator just started from being rolled back by an older in-flight poll. */
+	private mergeMacros(incoming: PublicMacroDto[], requestedAt: number): PublicMacroDto[] {
+		const current = new Map(this.state.macros.map((macro) => [macro.id, macro]))
+
+		return incoming.map((macro) =>
+			pickFresher(current.get(macro.id) ?? null, macro, requestedAt, this.lastLocalWriteAt),
+		)
+	}
+
+	private applyMacroUpdate(macro: PublicMacroDto, requestedAt: number): void {
+		const index = this.state.macros.findIndex((candidate) => candidate.id === macro.id)
+		const current = index < 0 ? null : (this.state.macros[index] ?? null)
+		const next = pickFresher(current, macro, requestedAt, this.lastLocalWriteAt)
+
+		if (next === current) {
+			return
+		}
+
+		const macros = index < 0 ? [...this.state.macros, next] : this.state.macros.with(index, next)
+		this.updateState({ macros, macrosSupported: true })
+	}
+
+	private removeMacro(macroId: string): void {
+		const macros = this.state.macros.filter((macro) => macro.id !== macroId)
+
+		if (macros.length !== this.state.macros.length) {
+			this.updateState({ macros })
+		}
 	}
 
 	private applyAlertEvent(occurredAt: string, scope: 'workspace' | 'entities', targetEntityIds: string[] | null): void {
@@ -1045,6 +1166,8 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			streamConnected: false,
 			status: null,
 			controls: null,
+			// The list survives so the buttons do not vanish, but nothing may keep claiming to run.
+			macros: this.state.macros.map((macro) => (macro.running ? { ...macro, running: false } : macro)),
 			lastError: lastError ?? display,
 		})
 		this.setInstanceStatus(status, display)
@@ -1085,15 +1208,25 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	// State publishing
 	// ---------------------------------------------------------------------------
 
-	private statusChoicesKey(): string {
-		return JSON.stringify(
-			this.getSelectableStatuses().map((status) => [
+	/**
+	 * What the registered definitions depend on. Deliberately excludes the running flag, so starting
+	 * a macro only re-checks feedbacks while a rename or a new macro re-registers the definitions.
+	 */
+	private definitionsKey(): string {
+		return JSON.stringify({
+			statuses: this.getSelectableStatuses().map((status) => [
 				status.id,
 				getCompanionStatusLabel(status),
 				status.colors.backgroundColor,
 				status.colors.foregroundColor,
 			]),
-		)
+			macros: this.getRunnableMacros().map((macro) => [
+				macro.id,
+				macro.label,
+				macro.colors.backgroundColor,
+				macro.colors.foregroundColor,
+			]),
+		})
 	}
 
 	/**
@@ -1121,13 +1254,17 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			changed.add('controls')
 		}
 
+		if (!sameJson(previous.macros, next.macros)) {
+			changed.add('macros')
+		}
+
 		const [firstFeedbackId, ...otherFeedbackIds] = feedbackIdsForGroups(changed)
 
 		if (firstFeedbackId !== undefined) {
 			this.checkFeedbacks(firstFeedbackId, ...otherFeedbackIds)
 		}
 
-		if (this.statusChoicesKey() !== this.registeredStatusChoicesKey) {
+		if (this.definitionsKey() !== this.registeredDefinitionsKey) {
 			this.updateDefinitions()
 		}
 	}

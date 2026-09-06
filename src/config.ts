@@ -25,6 +25,8 @@ export const maxPollIntervalMs = 60000
 export const baseUrlRegex = '/^https?:\\/\\/\\S+$/i'
 /** Regex string (Companion format) for a typed CrewLAN status id. */
 export const statusIdRegex = '/^[A-Za-z0-9_.:-]+$/'
+/** Regex string (Companion format) for a typed CrewLAN macro id. */
+export const macroIdRegex = '/^[A-Za-z0-9_.:-]+$/'
 
 export function normalizedToken(token: unknown): string {
 	return typeof token === 'string' ? token.trim() : ''

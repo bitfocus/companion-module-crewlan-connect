@@ -1,7 +1,7 @@
 import type { CompanionPresetDefinitions, CompanionPresetSection } from '@companion-module/base'
 import type ModuleInstance from './main.js'
 import type { ModuleSchema } from './main.js'
-import { getCompanionStatusButtonStyle } from './status-labels.js'
+import { getCompanionMacroButtonStyle, getCompanionStatusButtonStyle } from './button-style.js'
 
 const presetFontSize = 14
 const talkActiveColor = 0x0fcf29
@@ -12,7 +12,9 @@ const listenMutedColor = 0xcf2929
 export function UpdatePresets(self: ModuleInstance): void {
 	const selectableStatuses = self.getSelectableStatuses()
 	const presets: CompanionPresetDefinitions<ModuleSchema> = {}
+	// The preset id namespaces cannot collide as long as no status id starts with "macro_".
 	const statusPresetIds: string[] = []
+	const macroPresetIds: string[] = []
 
 	for (const status of selectableStatuses) {
 		const inactiveStyle = getCompanionStatusButtonStyle(status, false)
@@ -35,6 +37,32 @@ export function UpdatePresets(self: ModuleInstance): void {
 					feedbackId: 'status_is',
 					options: { statusId: status.id },
 					style: activeStyle,
+				},
+			],
+		}
+	}
+
+	for (const macro of self.getRunnableMacros()) {
+		const idleStyle = getCompanionMacroButtonStyle(macro, false)
+		const runningStyle = getCompanionMacroButtonStyle(macro, true)
+		const presetId = `macro_${macro.id}`
+
+		macroPresetIds.push(presetId)
+		presets[presetId] = {
+			type: 'simple',
+			name: `Macro: ${macro.label}`,
+			style: idleStyle,
+			steps: [
+				{
+					down: [{ actionId: 'run_macro', options: { macroId: macro.id } }],
+					up: [],
+				},
+			],
+			feedbacks: [
+				{
+					feedbackId: 'macro_running',
+					options: { macroId: macro.id },
+					style: runningStyle,
 				},
 			],
 		}
@@ -164,6 +192,22 @@ export function UpdatePresets(self: ModuleInstance): void {
 								type: 'simple' as const,
 								name: 'Status Buttons',
 								presets: statusPresetIds,
+							},
+						],
+					},
+				]
+			: []),
+		...(macroPresetIds.length > 0
+			? [
+					{
+						id: 'macros',
+						name: 'Macros',
+						definitions: [
+							{
+								id: 'macro-buttons',
+								type: 'simple' as const,
+								name: 'Macro Buttons',
+								presets: macroPresetIds,
 							},
 						],
 					},

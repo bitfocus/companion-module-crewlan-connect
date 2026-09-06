@@ -1,7 +1,7 @@
 import { combineRgb } from '@companion-module/base'
-import { statusIdRegex } from './config.js'
+import { macroIdRegex, statusIdRegex } from './config.js'
 import type ModuleInstance from './main.js'
-import { getCompanionStatusStyle } from './status-labels.js'
+import { getCompanionMacroStyle, getCompanionStatusStyle } from './button-style.js'
 
 export type FeedbacksSchema = {
 	connection_ok: { type: 'boolean'; options: Record<string, never> }
@@ -16,6 +16,8 @@ export type FeedbacksSchema = {
 	talk_latch_active: { type: 'boolean'; options: Record<string, never> }
 	talk_active: { type: 'boolean'; options: Record<string, never> }
 	talk_live: { type: 'boolean'; options: Record<string, never> }
+	macro_running: { type: 'boolean'; options: { macroId: string } }
+	macro_style: { type: 'advanced'; options: { macroId: string } }
 }
 
 function isCurrentStatus(self: ModuleInstance, statusId: string): boolean {
@@ -165,6 +167,56 @@ export function UpdateFeedbacks(self: ModuleInstance): void {
 			defaultStyle: { bgcolor: combineRgb(255, 152, 0), color: combineRgb(0, 0, 0) },
 			options: [],
 			callback: () => self.getCrewLanState().controls?.shoutbox.talk.active === true,
+		},
+		macro_running: {
+			name: 'Macro Running',
+			description: 'True while the selected macro is running.',
+			type: 'boolean',
+			defaultStyle: { bgcolor: combineRgb(15, 207, 41), color: combineRgb(0, 0, 0) },
+			options: [
+				{
+					id: 'macroId',
+					type: 'dropdown',
+					label: 'Macro',
+					default: self.getDefaultMacroChoice(),
+					choices: self.getMacroChoices(),
+					allowCustom: true,
+					regex: macroIdRegex,
+					tooltip: 'Pick a CrewLAN macro, or type a macro id to configure the button before the connection is up.',
+					description: 'Macro ids can be typed, so buttons can be built before the connection is up.',
+				},
+			],
+			callback: (feedback) => self.isMacroRunning(String(feedback.options.macroId ?? '')),
+		},
+		macro_style: {
+			name: 'Macro Style',
+			description:
+				'Paints the button with the label and colours CrewLAN publishes for the selected macro, dimmed while it is not running.',
+			type: 'advanced',
+			options: [
+				{
+					id: 'macroId',
+					type: 'dropdown',
+					label: 'Macro',
+					default: self.getDefaultMacroChoice(),
+					choices: self.getMacroChoices(),
+					allowCustom: true,
+					regex: macroIdRegex,
+					tooltip: 'Pick a CrewLAN macro, or type a macro id to configure the button before the connection is up.',
+					description: 'Macro ids can be typed, so buttons can be built before the connection is up.',
+				},
+			],
+			callback: (feedback) => {
+				const macroId = String(feedback.options.macroId ?? '')
+				const macro = self.getCrewLanState().macros.find((candidate) => candidate.id === macroId)
+
+				if (macro === undefined) {
+					return {}
+				}
+
+				// Only text and colours are overridden; size and the top bar stay under the user's control.
+				return getCompanionMacroStyle(macro, macro.running)
+			},
 		},
 		talk_live: {
 			name: 'Talk Live',

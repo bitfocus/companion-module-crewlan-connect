@@ -90,7 +90,35 @@ export interface PublicDismissEntityAlertsDto {
 	dismissedCount: number
 }
 
-export type PublicEventType = 'status.changed' | 'alert.triggered' | 'entity.controls.changed'
+export type PublicEventType =
+	'status.changed' | 'alert.triggered' | 'entity.controls.changed' | 'macro.changed' | 'macro.removed'
+
+/**
+ * A CrewLAN macro as the Public API publishes it.
+ *
+ * A macro is one-shot: Companion can start it, and the only state it reports back is whether a run
+ * is currently in progress.
+ */
+export interface PublicMacroDto {
+	id: string
+	label: string
+	colors: {
+		backgroundColor: string
+		foregroundColor: string
+	}
+	/** True while a run of this macro is in progress. */
+	running: boolean
+	/** The analogue of PublicStatusDto.selectable: false hides the macro from Companion. */
+	runnable: boolean
+	/** Sort key; ties break on label, then id. */
+	sortOrder: number
+	runStartedAt: string | null
+	updatedAt: string | null
+}
+
+export interface PublicMacroRemovedEventData {
+	id: string
+}
 
 export interface PublicEntitySummaryDto {
 	id: string
@@ -129,13 +157,17 @@ export interface CrewLanState {
 	workspace: PublicWorkspaceDto | null
 	entity: PublicEntityDto | null
 	statuses: PublicStatusDto[]
+	macros: PublicMacroDto[]
+	/** False when the connected CrewLAN has no macro support, so no macro buttons are offered. */
+	macrosSupported: boolean
 	status: PublicEntityStatusDto | null
 	controls: PublicEntityControlsDto | null
 	lastAlert: string
 	lastError: string
 }
 
-export interface CrewLanStatusChoice {
+/** A dropdown entry, used for both status and macro pickers. */
+export interface CrewLanChoice {
 	id: string
 	label: string
 }

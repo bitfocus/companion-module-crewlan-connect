@@ -1,5 +1,7 @@
 import type {
 	PublicAlertTriggeredEventData,
+	PublicMacroDto,
+	PublicMacroRemovedEventData,
 	PublicDismissEntityAlertsDto,
 	PublicEntityControlsDto,
 	PublicEntityDto,
@@ -72,6 +74,32 @@ export function isPublicStatusDto(value: unknown): value is PublicStatusDto {
 
 export function isPublicStatusDtoList(value: unknown): value is PublicStatusDto[] {
 	return isArrayOf(value, isPublicStatusDto)
+}
+
+/**
+ * `sortOrder` and `runStartedAt` are deliberately not checked: a macro that omits them must still
+ * be usable, it only falls back to label ordering.
+ */
+export function isPublicMacroDto(value: unknown): value is PublicMacroDto {
+	return (
+		isRecord(value) &&
+		isString(value.id) &&
+		isString(value.label) &&
+		isRecord(value.colors) &&
+		isString(value.colors.backgroundColor) &&
+		isString(value.colors.foregroundColor) &&
+		isBoolean(value.running) &&
+		isBoolean(value.runnable) &&
+		(value.updatedAt === undefined || isNullableString(value.updatedAt))
+	)
+}
+
+export function isPublicMacroDtoList(value: unknown): value is PublicMacroDto[] {
+	return isArrayOf(value, isPublicMacroDto)
+}
+
+export function isPublicMacroRemovedEventData(value: unknown): value is PublicMacroRemovedEventData {
+	return isRecord(value) && isString(value.id)
 }
 
 export function isPublicEntityDto(value: unknown): value is PublicEntityDto {

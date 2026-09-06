@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net'
 import { after, before, describe, it } from 'node:test'
 import { setTimeout as sleep } from 'node:timers/promises'
 import ModuleInstance from '../src/main.js'
-import type { PublicEntityControlsDto, PublicEntityStatusDto, PublicStatusDto } from '../src/types.js'
+import type { PublicEntityControlsDto, PublicEntityStatusDto, PublicMacroDto, PublicStatusDto } from '../src/types.js'
 
 /**
  * End-to-end checks against a stub of the CrewLAN Public API: the module is driven through a fake
@@ -31,9 +31,27 @@ function laterIso(offsetMs: number): string {
 	return new Date(Date.now() + offsetMs).toISOString()
 }
 
+function makeMacro(id: string, label: string, overrides: Partial<PublicMacroDto> = {}): PublicMacroDto {
+	return {
+		id,
+		label,
+		colors: { backgroundColor: '#0fcf29', foregroundColor: '#101820' },
+		running: false,
+		runnable: true,
+		sortOrder: 0,
+		runStartedAt: null,
+		updatedAt: laterIso(0),
+		...overrides,
+	}
+}
+
 interface Stub {
 	port: number
 	calls: string[]
+	macros: PublicMacroDto[]
+	macrosSupported: boolean
+	/** When true the stub drops every connection, standing in for a host that went away. */
+	offline: boolean
 	controls: PublicEntityControlsDto
 	status: PublicEntityStatusDto
 	stream: http.ServerResponse | null
@@ -65,12 +83,21 @@ async function startCrewLanStub(): Promise<Stub> {
 			selectedStatusId: 'sys-green',
 			updatedAt: laterIso(0),
 		},
+		macros: [makeMacro('macro-showstart', 'Show Start'), makeMacro('macro-hidden', 'Hidden', { runnable: false })],
+		macrosSupported: true,
+		offline: false,
 		stream: null,
 		close: async () => undefined,
 	}
 
 	const server = http.createServer((request, response) => {
 		const path = (request.url ?? '').split('?')[0] ?? ''
+
+		if (stub.offline) {
+			request.socket.destroy()
+			return
+		}
+
 		stub.calls.push(`${request.method ?? 'GET'} ${path}`)
 		let body = ''
 		request.on('data', (chunk) => (body += String(chunk)))
@@ -154,6 +181,34 @@ async function startCrewLanStub(): Promise<Stub> {
 				return
 			}
 
+			if (path === '/api/v1/macros') {
+				if (!stub.macrosSupported) {
+					response.writeHead(404, { 'content-type': 'application/json' })
+					response.end(JSON.stringify({ error: 'not_found', message: 'No macro support.' }))
+					return
+				}
+
+				json(stub.macros)
+				return
+			}
+
+			if (path.startsWith('/api/v1/macros/') && path.endsWith('/run')) {
+				const macroId = decodeURIComponent(path.slice('/api/v1/macros/'.length, -'/run'.length))
+				const index = stub.macros.findIndex((macro) => macro.id === macroId)
+				const current = stub.macros[index]
+
+				if (current === undefined) {
+					response.writeHead(404, { 'content-type': 'application/json' })
+					response.end(JSON.stringify({ error: 'not_found', message: 'No such macro.' }))
+					return
+				}
+
+				const started = { ...current, running: true, runStartedAt: laterIso(0), updatedAt: laterIso(3000) }
+				stub.macros = stub.macros.with(index, started)
+				json(started)
+				return
+			}
+
 			if (path === '/api/v1/entities/alex/alerts/dismiss') {
 				json({ status: 'updated', entityId: 'alex', dismissedCount: 1 })
 				return
@@ -179,6 +234,7 @@ interface Host {
 	variables: Record<string, unknown>
 	registered: { actions: string[]; feedbacks: string[]; variables: string[]; presets: string[] }
 	checked: string[][]
+	registrations: number
 	status: string | null
 	logs: string[]
 	actions: Record<string, { callback: (event: { options: Record<string, unknown> }) => unknown }>
@@ -190,6 +246,7 @@ function createHost(): Host {
 		variables: {},
 		registered: { actions: [], feedbacks: [], variables: [], presets: [] },
 		checked: [],
+		registrations: 0,
 		status: null,
 		logs: [],
 		actions: {},
@@ -209,6 +266,7 @@ function createHost(): Host {
 		},
 		setPresetDefinitions: (_structure: unknown, presets: Record<string, unknown>) => {
 			host.registered.presets = Object.keys(presets)
+			host.registrations += 1
 		},
 		setVariableDefinitions: (definitions: Record<string, unknown>) => {
 			host.registered.variables = Object.keys(definitions)
@@ -274,11 +332,13 @@ describe('module against a CrewLAN stub', () => {
 	})
 
 	it('registers its full Companion surface', () => {
-		assert.equal(host.registered.actions.length, 7)
-		assert.equal(host.registered.feedbacks.length, 12)
-		assert.equal(host.registered.variables.length, 17)
-		// Four fixed presets plus one per selectable status.
-		assert.equal(host.registered.presets.length, 6)
+		assert.equal(host.registered.actions.length, 8)
+		assert.equal(host.registered.feedbacks.length, 14)
+		assert.equal(host.registered.variables.length, 20)
+		// Four fixed presets, one per selectable status, one per runnable macro.
+		assert.equal(host.registered.presets.length, 7)
+		assert.ok(host.registered.presets.includes('macro_macro-showstart'))
+		assert.ok(!host.registered.presets.includes('macro_macro-hidden'), 'a macro that is not runnable gets no button')
 	})
 
 	it('connects and publishes state, with booleans as real booleans', () => {
@@ -288,6 +348,9 @@ describe('module against a CrewLAN stub', () => {
 		assert.equal(host.variables.event_stream_connected, true)
 		assert.equal(host.variables.talk_live, false)
 		assert.equal(typeof host.variables.talk_live, 'boolean')
+		assert.equal(host.variables.macros_supported, true)
+		assert.equal(host.variables.running_macro_count, 0)
+		assert.equal(host.variables.running_macro_labels, '')
 	})
 
 	it('opens and closes the talk channel well inside the action budget', async () => {
@@ -374,6 +437,73 @@ describe('module against a CrewLAN stub', () => {
 		await waitFor(() => host.variables.current_status_id === 'sys-green', 'the split frame to be applied')
 	})
 
+	it('starts a macro and lights its button without re-registering the definitions', async () => {
+		host.checked.length = 0
+		const registrationsBefore = host.registrations
+
+		await host.actions.run_macro?.callback({ options: { macroId: 'macro-showstart' } })
+
+		assert.equal(stub.macros[0]?.running, true)
+		assert.equal(host.variables.running_macro_count, 1)
+		assert.equal(host.variables.running_macro_labels, 'Show Start')
+
+		const lastCheck = host.checked.at(-1) ?? []
+		assert.deepEqual(lastCheck, ['macro_running', 'macro_style'], 'only the macro feedbacks are rechecked')
+		assert.equal(host.registrations, registrationsBefore, 'a running macro must not re-register the definitions')
+	})
+
+	it('refuses to start a macro CrewLAN does not know', async () => {
+		const callsBefore = stub.calls.length
+
+		await host.actions.run_macro?.callback({ options: { macroId: 'macro-nope' } })
+
+		assert.equal(stub.calls.length, callsBefore, 'no request is sent for an unknown macro')
+		assert.ok(host.logs.some((line) => /has no macro with id "macro-nope"/u.test(line)))
+	})
+
+	it('adds, updates and removes macros from live events', async () => {
+		const registrationsBefore = host.registrations
+		const added = makeMacro('macro-blackout', 'Blackout', { updatedAt: laterIso(10000) })
+		stub.stream?.write(
+			`id: 20\nevent: macro.changed\ndata: ${JSON.stringify({
+				id: '20',
+				type: 'macro.changed',
+				occurredAt: laterIso(10000),
+				meta,
+				data: added,
+			})}\n\n`,
+		)
+		await waitFor(() => host.registered.presets.includes('macro_macro-blackout'), 'the new macro to get a button')
+		assert.ok(host.registrations > registrationsBefore, 'a new macro re-registers the definitions')
+
+		stub.stream?.write(
+			`id: 21\nevent: macro.removed\ndata: ${JSON.stringify({
+				id: '21',
+				type: 'macro.removed',
+				occurredAt: laterIso(11000),
+				meta,
+				data: { id: 'macro-blackout' },
+			})}\n\n`,
+		)
+		await waitFor(() => !host.registered.presets.includes('macro_macro-blackout'), 'the removed macro to disappear')
+	})
+
+	it('ignores a macro update that is older than the state it would overwrite', async () => {
+		const stale = makeMacro('macro-showstart', 'Show Start', { running: false, updatedAt: '2020-01-01T00:00:00.000Z' })
+		stub.stream?.write(
+			`id: 22\nevent: macro.changed\ndata: ${JSON.stringify({
+				id: '22',
+				type: 'macro.changed',
+				occurredAt: laterIso(12000),
+				meta,
+				data: stale,
+			})}\n\n`,
+		)
+		await sleep(200)
+
+		assert.equal(host.variables.running_macro_count, 1, 'the running macro survives a stale update')
+	})
+
 	it('notices a stream the server closed and keeps working', async () => {
 		const callsBefore = stub.calls.length
 		stub.stream?.end()
@@ -383,6 +513,15 @@ describe('module against a CrewLAN stub', () => {
 		await waitFor(() => host.logs.some((line) => /event stream/iu.test(line)), 'the lost stream to be reported')
 	})
 
+	it('stops claiming a macro runs once the connection is gone', async () => {
+		const presetsBefore = host.registered.presets.length
+		stub.offline = true
+
+		await waitFor(() => host.status !== 'ok', 'the connection to be reported as broken')
+		await waitFor(() => host.variables.running_macro_count === 0, 'the running flag to be cleared')
+		assert.equal(host.registered.presets.length, presetsBefore, 'the macro buttons survive the disconnect')
+	})
+
 	it('makes no further requests after destroy', async () => {
 		await host.instance.destroy()
 		const callsAtDestroy = stub.calls.length
@@ -390,5 +529,34 @@ describe('module against a CrewLAN stub', () => {
 		await sleep(2500)
 
 		assert.equal(stub.calls.length, callsAtDestroy)
+	})
+})
+
+describe('module against a CrewLAN without macro support', () => {
+	let stub: Stub
+	let host: Host
+
+	before(async () => {
+		stub = await startCrewLanStub()
+		stub.macrosSupported = false
+		host = createHost()
+		await host.instance.init({ baseUrl: `http://127.0.0.1:${String(stub.port)}`, pollIntervalMs: 1000 }, true, {
+			entityToken: 'cle_test',
+		})
+		await waitFor(() => host.status === 'ok', 'the connection to report ok')
+	})
+
+	after(async () => {
+		await host.instance.destroy()
+		await stub.close()
+	})
+
+	it('connects anyway and simply offers no macro buttons', () => {
+		assert.equal(host.status, 'ok')
+		assert.equal(host.variables.macros_supported, false)
+		assert.equal(
+			host.registered.presets.some((id) => id.startsWith('macro_')),
+			false,
+		)
 	})
 })

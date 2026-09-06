@@ -1,4 +1,4 @@
-import { statusIdRegex } from './config.js'
+import { macroIdRegex, statusIdRegex } from './config.js'
 import type ModuleInstance from './main.js'
 
 type MuteMode = 'toggle' | 'on' | 'off'
@@ -31,6 +31,11 @@ export type ActionsSchema = {
 	}
 	refresh: {
 		options: Record<string, never>
+	}
+	run_macro: {
+		options: {
+			macroId: string
+		}
 	}
 }
 
@@ -139,6 +144,28 @@ export function UpdateActions(self: ModuleInstance): void {
 			callback: async () => {
 				await self.runCrewLanAction('Dismiss Alerts', async () => {
 					await self.dismissAlerts()
+				})
+			},
+		},
+		run_macro: {
+			name: 'Run Macro',
+			description: 'Starts a CrewLAN macro. One-shot: there is no stop or toggle.',
+			options: [
+				{
+					id: 'macroId',
+					type: 'dropdown',
+					label: 'Macro',
+					default: self.getDefaultMacroChoice(),
+					choices: self.getMacroChoices(),
+					allowCustom: true,
+					regex: macroIdRegex,
+					tooltip: 'Pick a CrewLAN macro, or type a macro id to configure the button before the connection is up.',
+					description: 'Macro ids can be typed, so buttons can be built before the connection is up.',
+				},
+			],
+			callback: async (event) => {
+				await self.runCrewLanAction('Run Macro', async () => {
+					await self.runCrewLanMacro(String(event.options.macroId ?? ''))
 				})
 			},
 		},

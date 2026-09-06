@@ -577,3 +577,141 @@ describe('CrewLAN API client transport classification', () => {
 		)
 	})
 })
+
+describe('CrewLAN API client macros', () => {
+	const macro = {
+		id: 'macro-showstart',
+		label: 'Show Start',
+		colors: { backgroundColor: '#0fcf29', foregroundColor: '#101820' },
+		running: false,
+		runnable: true,
+		sortOrder: 10,
+		runStartedAt: null,
+		updatedAt: '2026-08-03T18:00:00.000Z',
+	}
+
+	it('lists the macros of the workspace', async () => {
+		let requestedUrl = ''
+		let requestedAuthorization = ''
+
+		const macros = await withFetch(
+			async (input, init) => {
+				requestedUrl = requestUrl(input)
+				requestedAuthorization = String(new Headers(init?.headers).get('authorization') ?? '')
+
+				return jsonResponse({ data: [macro], meta })
+			},
+			async () => createClient().listMacros(),
+		)
+
+		assert.equal(requestedUrl, 'http://127.0.0.1:4848/api/v1/macros')
+		assert.equal(requestedAuthorization, 'Bearer cle_test-token')
+		assert.equal(macros?.length, 1)
+		assert.equal(macros?.[0]?.label, 'Show Start')
+	})
+
+	it('reports a CrewLAN without macro support as null instead of failing', async () => {
+		const logger = createLogger()
+
+		const macros = await withFetch(
+			async () => jsonResponse({ error: 'not_found', message: 'No such CrewLAN resource.' }, 404),
+			async () => createClient(logger).listMacros(),
+		)
+
+		assert.equal(macros, null)
+		assert.equal(logger.debugMessages.length, 1)
+	})
+
+	it('still fails on any other error from the macro list', async () => {
+		await withFetch(
+			async () => jsonResponse({ error: 'unauthorized', message: 'Workspace access is required.' }, 401),
+			async () => {
+				await assert.rejects(
+					createClient().listMacros(),
+					(error: unknown) => error instanceof CrewLanApiError && error.statusCode === 401,
+				)
+			},
+		)
+	})
+
+	it('rejects a macro list that does not match the expected shape', async () => {
+		await withFetch(
+			async () => jsonResponse({ data: [{ id: 'macro-1' }], meta }),
+			async () => {
+				await assert.rejects(
+					createClient().listMacros(),
+					(error: unknown) => error instanceof CrewLanApiError && error.kind === 'invalid-response',
+				)
+			},
+		)
+	})
+
+	it('starts a macro and returns the updated macro', async () => {
+		let requestedUrl = ''
+		let requestedMethod = ''
+		let requestedBody: unknown = 'unset'
+
+		const started = await withFetch(
+			async (input, init) => {
+				requestedUrl = requestUrl(input)
+				requestedMethod = String(init?.method ?? 'GET')
+				requestedBody = init?.body
+
+				return jsonResponse({ data: { ...macro, running: true, runStartedAt: '2026-08-03T18:05:00.000Z' }, meta })
+			},
+			async () => createClient().runMacro('macro-showstart'),
+		)
+
+		assert.equal(requestedUrl, 'http://127.0.0.1:4848/api/v1/macros/macro-showstart/run')
+		assert.equal(requestedMethod, 'POST')
+		assert.equal(requestedBody, undefined)
+		assert.equal(started.running, true)
+	})
+
+	it('escapes the macro id in the run url', async () => {
+		let requestedUrl = ''
+
+		await withFetch(
+			async (input) => {
+				requestedUrl = requestUrl(input)
+
+				return jsonResponse({ data: macro, meta })
+			},
+			async () => createClient().runMacro('show start/1'),
+		)
+
+		assert.equal(requestedUrl, 'http://127.0.0.1:4848/api/v1/macros/show%20start%2F1/run')
+	})
+
+	it('reports a macro that is already running as an ordinary HTTP failure', async () => {
+		await withFetch(
+			async () => jsonResponse({ error: 'conflict', message: 'That macro is already running.' }, 409),
+			async () => {
+				await assert.rejects(
+					createClient().runMacro('macro-showstart'),
+					(error: unknown) =>
+						error instanceof CrewLanApiError &&
+						error.kind === 'http' &&
+						error.statusCode === 409 &&
+						error.message === 'That macro is already running.',
+				)
+			},
+		)
+	})
+
+	it('subscribes to the macro events on the stream', async () => {
+		let requestedUrl = ''
+
+		await withFetch(
+			async (input) => {
+				requestedUrl = requestUrl(input)
+
+				return streamResponse([])
+			},
+			async () => createClient().streamEvents({ signal: new AbortController().signal, onEvent: () => undefined }),
+		)
+
+		assert.match(requestedUrl, /types=.*macro\.changed/u)
+		assert.match(requestedUrl, /types=.*macro\.removed/u)
+	})
+})

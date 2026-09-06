@@ -1,5 +1,5 @@
 import type ModuleInstance from './main.js'
-import { getCompanionStatusLabel } from './status-labels.js'
+import { getCompanionStatusLabel } from './button-style.js'
 
 export type VariablesSchema = {
 	workspace_name: string
@@ -17,6 +17,9 @@ export type VariablesSchema = {
 	talk_live: boolean
 	talk_control_mode: string
 	event_stream_connected: boolean
+	macros_supported: boolean
+	running_macro_count: number
+	running_macro_labels: string
 	last_alert: string
 	last_error: string
 }
@@ -38,6 +41,9 @@ export function UpdateVariableDefinitions(self: ModuleInstance): void {
 		talk_live: { name: 'Talk live state' },
 		talk_control_mode: { name: 'Talk control mode' },
 		event_stream_connected: { name: 'Live event stream connected' },
+		macros_supported: { name: 'CrewLAN offers macros' },
+		running_macro_count: { name: 'Running macro count' },
+		running_macro_labels: { name: 'Running macro labels' },
 		last_alert: { name: 'Last alert' },
 		last_error: { name: 'Last error' },
 	})
@@ -47,6 +53,7 @@ export function UpdateVariableValues(self: ModuleInstance): void {
 	const state = self.getCrewLanState()
 	const listen = state.controls?.shoutbox.listen
 	const talk = state.controls?.shoutbox.talk
+	const runningMacros = state.macros.filter((macro) => macro.running)
 
 	self.setVariableValues({
 		workspace_name: state.workspace?.name ?? '',
@@ -64,6 +71,9 @@ export function UpdateVariableValues(self: ModuleInstance): void {
 		talk_live: talk?.live === true,
 		talk_control_mode: talk?.controlMode ?? '',
 		event_stream_connected: state.streamConnected,
+		macros_supported: state.macrosSupported,
+		running_macro_count: runningMacros.length,
+		running_macro_labels: runningMacros.map((macro) => macro.label).join(', '),
 		last_alert: state.lastAlert,
 		last_error: state.lastError,
 	})

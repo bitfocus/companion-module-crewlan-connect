@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { getCompanionStatusButtonStyle, getCompanionStatusLabel } from '../src/status-labels.js'
-import type { PublicStatusDto } from '../src/types.js'
+import {
+	getCompanionMacroButtonStyle,
+	getCompanionStatusButtonStyle,
+	getCompanionStatusLabel,
+} from '../src/button-style.js'
+import type { PublicMacroDto, PublicStatusDto } from '../src/types.js'
 
 function createStatus(input: Partial<PublicStatusDto>): PublicStatusDto {
 	return {
@@ -59,5 +63,43 @@ describe('Companion status labels', () => {
 		assert.equal(activeStyle.bgcolor, 0x0fcf29)
 		assert.equal(inactiveStyle.color, 0x101820)
 		assert.equal(activeStyle.color, 0x101820)
+	})
+})
+
+describe('Companion macro button styles', () => {
+	const macro: PublicMacroDto = {
+		id: 'macro-showstart',
+		label: 'Show Start',
+		colors: { backgroundColor: '#0fcf29', foregroundColor: '#101820' },
+		running: false,
+		runnable: true,
+		sortOrder: 0,
+		runStartedAt: null,
+		updatedAt: null,
+	}
+
+	it('dims an idle macro and lights a running one, exactly like a status', () => {
+		const idle = getCompanionMacroButtonStyle(macro, false)
+		const running = getCompanionMacroButtonStyle(macro, true)
+
+		assert.equal(idle.bgcolor, 0x05420d)
+		assert.equal(running.bgcolor, 0x0fcf29)
+		assert.equal(idle.color, 0x101820)
+		assert.equal(running.color, 0x101820)
+		assert.equal(idle.size, 14)
+	})
+
+	it('uses the macro label verbatim', () => {
+		assert.equal(getCompanionMacroButtonStyle({ ...macro, label: 'sys-green' }, false).text, 'sys-green')
+	})
+
+	it('falls back to a macro colour when CrewLAN sends an unusable one', () => {
+		const broken = getCompanionMacroButtonStyle(
+			{ ...macro, colors: { backgroundColor: 'nope', foregroundColor: 'nope' } },
+			true,
+		)
+
+		assert.equal(broken.bgcolor, 0x8e24aa)
+		assert.equal(broken.color, 0xffffff)
 	})
 })

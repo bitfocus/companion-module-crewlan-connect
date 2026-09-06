@@ -44,11 +44,22 @@ Audio stays in CrewLAN. Companion only controls the live state of the CrewLAN Sh
 - **Talk Push Active**, **Talk Latch Active** — talk is active in that specific mode.
 - **Talk Active** — talk is active in either mode.
 - **Talk Live** — CrewLAN reports the microphone as live on the device.
+- **Macro Running** — the selected macro is running.
+- **Macro Style** — paints the button with the label and colours CrewLAN publishes for the selected macro, dimmed while it is not running. It overrides text and colours only.
 
-All feedbacks except Current Status Style are boolean, so they can be styled freely and used as trigger conditions.
+All feedbacks except Current Status Style and Macro Style are boolean, so they can be styled freely and used as trigger conditions.
+
+## Macros
+
+Every macro CrewLAN publishes becomes a ready-made button. The text is the macro name, the colours are the macro colours, and the button is dimmed while the macro is idle and fully lit while it runs. Pressing it starts the macro.
+
+Macros are one-shot. There is no stop, no pause and no toggle, and Companion shows no progress or step count. The only state is running or not running. Starting a macro that is already running is reported in the log and leaves the connection untouched.
+
+Names, colours, the running state and the set of macros update live. A CrewLAN that has no macro support simply offers no macro presets, and the `macros_supported` variable stays false.
 
 ## Presets
 
+- **Macros** — one button per macro, dimmed while idle and fully lit while running.
 - **Status** — one button per selectable CrewLAN status, styled in that status's colours and lit while it is the current one.
 - **Shoutbox** — Listen Mute Toggle, Talk Push (down and up on one button) and Talk Latch.
 - **Alerts** — Dismiss Alerts.

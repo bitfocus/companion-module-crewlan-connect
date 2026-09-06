@@ -1,5 +1,7 @@
 import {
 	isAnything,
+	isPublicMacroDto,
+	isPublicMacroDtoList,
 	isItemResponse,
 	isPublicDismissEntityAlertsDto,
 	isPublicEntityControlsDto,
@@ -14,6 +16,7 @@ import {
 import type { ReadableStreamReadResult } from 'node:stream/web'
 import type {
 	PublicDismissEntityAlertsDto,
+	PublicMacroDto,
 	PublicEntityControlsDto,
 	PublicEntityDto,
 	PublicEntityStatusDto,
@@ -36,6 +39,14 @@ export const defaultReadBackTimeoutMs = 1500
 export const errorBodyTimeoutMs = 1000
 /** Default deadline for receiving the response headers of the event stream. */
 export const defaultStreamConnectTimeoutMs = 10000
+/** The event types the module subscribes to on the CrewLAN event stream. */
+export const subscribedEventTypes = [
+	'status.changed',
+	'alert.triggered',
+	'entity.controls.changed',
+	'macro.changed',
+	'macro.removed',
+].join(',')
 /** Largest amount of undelivered event-stream text the parser will hold before giving up. */
 export const maxEventStreamBufferBytes = 1024 * 1024
 
@@ -433,6 +444,40 @@ export class CrewLanApiClient {
 		).data
 	}
 
+	/**
+	 * List the workspace macros.
+	 *
+	 * A CrewLAN without macro support answers 404 on the collection. That is reported as `null`
+	 * rather than as a failure, so an older host still connects and simply offers no macro buttons.
+	 */
+	async listMacros(options: RequestOptions = {}): Promise<PublicMacroDto[] | null> {
+		try {
+			return (await this.request('/api/v1/macros', {}, options, isItemResponse(isPublicMacroDtoList))).data
+		} catch (error) {
+			if (error instanceof CrewLanApiError && error.statusCode === 404) {
+				this.logger.debug('This CrewLAN has no macro support; macro buttons stay empty.')
+				return null
+			}
+
+			throw error
+		}
+	}
+
+	/**
+	 * Start a macro. The response carries the updated macro, because a one-shot macro can already
+	 * have finished by the time a separate re-read would land.
+	 */
+	async runMacro(macroId: string, options: RequestOptions = {}): Promise<PublicMacroDto> {
+		return (
+			await this.request(
+				`/api/v1/macros/${encodeURIComponent(macroId)}/run`,
+				{ method: 'POST' },
+				options,
+				isItemResponse(isPublicMacroDto),
+			)
+		).data
+	}
+
 	async dismissEntityAlerts(entityId: string, options: RequestOptions = {}): Promise<PublicDismissEntityAlertsDto> {
 		return (
 			await this.request(
@@ -465,13 +510,10 @@ export class CrewLanApiClient {
 		let response: Response
 
 		try {
-			response = await fetch(
-				`${this.baseUrl}/api/v1/events?types=status.changed,alert.triggered,entity.controls.changed`,
-				{
-					headers: this.headers({ accept: 'text/event-stream' }),
-					signal: fetchAbort.signal,
-				},
-			)
+			response = await fetch(`${this.baseUrl}/api/v1/events?types=${subscribedEventTypes}`, {
+				headers: this.headers({ accept: 'text/event-stream' }),
+				signal: fetchAbort.signal,
+			})
 		} catch (error) {
 			signal.removeEventListener('abort', abortFetch)
 

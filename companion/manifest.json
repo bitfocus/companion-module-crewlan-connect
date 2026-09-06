@@ -4,7 +4,7 @@
 	"id": "crewlan-connect",
 	"name": "CrewLAN Connect",
 	"shortname": "CrewLAN",
-	"description": "Control CrewLAN statuses, alerts, and Shoutbox live controls.",
+	"description": "Control CrewLAN statuses, alerts, macros, and Shoutbox live controls.",
 	"version": "0.0.0",
 	"license": "MIT",
 	"repository": "git+https://github.com/bitfocus/companion-module-crewlan-connect.git",
@@ -25,5 +25,5 @@
 	"legacyIds": [],
 	"manufacturer": "CrewLAN",
 	"products": ["CrewLAN Connect"],
-	"keywords": ["status", "alerts", "shoutbox", "public api"]
+	"keywords": ["status", "alerts", "shoutbox", "public api", "macros"]
 }
