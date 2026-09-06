@@ -37,6 +37,13 @@ export const streamHealthyPollIntervalMs = 30_000
 export const eventStreamIdleTimeoutMs = 45_000
 export const reconnectBackoffBaseMs = 1000
 export const reconnectBackoffMaxMs = 30_000
+/**
+ * How long an event stream has to stay open before its loss counts as the failure of a healthy
+ * stream rather than as another flap. It is the backoff cap: a host that cannot hold the stream for
+ * longer than the longest retry delay is not recovering, it is flapping, and its backoff has to keep
+ * growing instead of restarting from one second.
+ */
+export const streamStableAfterMs = reconnectBackoffMaxMs
 /** Retry cadence for failures only CrewLAN itself can clear (a rejected token, a 400/404 answer). */
 export const nonRecoverableRetryDelayMs = 60_000
 /** How long `last_alert` keeps reporting an alert that was never dismissed. */
@@ -319,6 +326,8 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	private streamRestartTimer: NodeJS.Timeout | null = null
 	private alertTimer: NodeJS.Timeout | null = null
 	private streamRestartAttempt = 0
+	/** When the current event stream was accepted, or 0 while no stream is open. */
+	private streamOpenedAt = 0
 	/** Serialises talk writes so a quick press/release can never be applied out of order. */
 	private talkQueue: Promise<void> = Promise.resolve()
 	/** The same for the listen channel, so a double-pressed mute toggle still ends up toggled. */
@@ -671,6 +680,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		// The stream backoff belongs to the connection being torn down; a rebuilt connection starts
 		// its stream fresh, and a stale count here would also fake a "restarted" resync snapshot.
 		this.streamRestartAttempt = 0
+		this.streamOpenedAt = 0
 		this.clearReconnectTimer()
 		this.clearPollTimer()
 		this.clearStreamRestartTimer()
@@ -799,7 +809,11 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		}
 
 		const wasRestarting = this.streamRestartAttempt > 0
-		this.streamRestartAttempt = 0
+		// The handshake alone does not clear the backoff. A host that accepts the stream and drops it
+		// again immediately would otherwise make every loss look like the first one, so the delay
+		// would never grow past its one second floor. handleStreamLost() decides that instead, from
+		// how long the stream actually stood.
+		this.streamOpenedAt = Date.now()
 		this.updateState({ streamConnected: true })
 		this.log('debug', 'CrewLAN event stream connected.')
 		// Events missed while the stream was down cannot be replayed: resync right away, then drop
@@ -821,6 +835,14 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			return
 		}
 
+		// A stream that stood long enough was healthy, so its loss starts the backoff over. One that
+		// was accepted and lost again straight away keeps escalating towards the 30 s cap, and only
+		// the first of those losses is a warning.
+		if (this.streamOpenedAt > 0 && Date.now() - this.streamOpenedAt >= streamStableAfterMs) {
+			this.streamRestartAttempt = 0
+		}
+
+		this.streamOpenedAt = 0
 		const attempt = this.streamRestartAttempt++
 		const delayMs = computeReconnectDelayMs(attempt, InstanceStatus.ConnectionFailure)
 		this.log(

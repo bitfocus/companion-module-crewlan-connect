@@ -52,6 +52,11 @@ interface Stub {
 	macrosSupported: boolean
 	/** When true the stub drops every connection, standing in for a host that went away. */
 	offline: boolean
+	/**
+	 * When true the stub accepts the event-stream handshake and closes the body at once, standing in
+	 * for a reverse proxy that does not do SSE or a CrewLAN restarting in a loop.
+	 */
+	flapStream: boolean
 	controls: PublicEntityControlsDto
 	status: PublicEntityStatusDto
 	stream: http.ServerResponse | null
@@ -86,6 +91,7 @@ async function startCrewLanStub(): Promise<Stub> {
 		macros: [makeMacro('macro-showstart', 'Show Start'), makeMacro('macro-hidden', 'Hidden', { runnable: false })],
 		macrosSupported: true,
 		offline: false,
+		flapStream: false,
 		stream: null,
 		close: async () => undefined,
 	}
@@ -127,6 +133,12 @@ async function startCrewLanStub(): Promise<Stub> {
 				}
 
 				response.writeHead(200, { 'content-type': 'text/event-stream' })
+
+				if (stub.flapStream) {
+					response.end()
+					return
+				}
+
 				response.write('retry: 1000\n\n: heartbeat\n\n')
 				stub.stream = response
 				return
@@ -539,11 +551,19 @@ describe('module against a CrewLAN stub', () => {
 
 	it('notices a stream the server closed and keeps working', async () => {
 		const callsBefore = stub.calls.length
+		// host.logs is cumulative for the whole suite and already holds "CrewLAN event stream
+		// connected." from the setup, so the loss has to be matched by its own wording against only
+		// the lines written from here on. Matching /event stream/ over the whole array passes even
+		// when the loss is never reported at all.
+		const logsBefore = host.logs.length
 		stub.stream?.end()
 		stub.stream = null
 
 		await waitFor(() => stub.calls.length > callsBefore, 'polling to continue after the stream closed')
-		await waitFor(() => host.logs.some((line) => /event stream/iu.test(line)), 'the lost stream to be reported')
+		await waitFor(
+			() => host.logs.slice(logsBefore).some((line) => /event stream lost/iu.test(line)),
+			'the lost stream to be reported',
+		)
 	})
 
 	it('stops claiming a macro runs once the connection is gone', async () => {
@@ -660,5 +680,58 @@ describe('module started without a connection token', () => {
 			{ entityToken: 'cle_test' },
 		)
 		await waitFor(() => host.status === 'ok', 'the connection to come up once the token is entered')
+	})
+})
+
+/**
+ * A host that accepts the SSE handshake and then closes the body — a reverse proxy without SSE
+ * support, or a CrewLAN restarting in a loop. The handshake succeeding must not be enough to clear
+ * the stream backoff, or the module retries once a second and warns once a second forever.
+ */
+describe('module against a CrewLAN whose event stream flaps', () => {
+	let stub: Stub
+	let host: Host
+
+	before(async () => {
+		stub = await startCrewLanStub()
+		stub.flapStream = true
+		host = createHost()
+		// The poll fallback is parked at its maximum, so every request the module makes here is one
+		// the stream restart drove, never the ordinary fallback poll.
+		await host.instance.init({ baseUrl: `http://127.0.0.1:${String(stub.port)}`, pollIntervalMs: 60000 }, true, {
+			entityToken: 'cle_test',
+		})
+	})
+
+	after(async () => {
+		await host.instance.destroy()
+		await stub.close()
+	})
+
+	function streamLostLines(): string[] {
+		return host.logs.filter((line) => /event stream lost/iu.test(line))
+	}
+
+	it('backs the stream retries off instead of reopening once a second', async () => {
+		await waitFor(() => streamLostLines().length >= 3, 'three stream losses')
+
+		const delays = streamLostLines().map((line) => Number(/retrying the stream in (\d+) ms/u.exec(line)?.[1] ?? '0'))
+
+		for (let index = 1; index < delays.length; index++) {
+			assert.ok(
+				(delays[index] ?? 0) > (delays[index - 1] ?? 0),
+				`retry ${String(index + 1)} waits longer than retry ${String(index)}: ${JSON.stringify(delays)}`,
+			)
+		}
+	})
+
+	it('warns about the flapping stream once, not on every retry', () => {
+		const warnings = streamLostLines().filter((line) => line.startsWith('warn:'))
+
+		assert.equal(warnings.length, 1, `only the first loss is a warning, got ${JSON.stringify(streamLostLines())}`)
+	})
+
+	it('keeps the connection up while the stream keeps failing', () => {
+		assert.equal(host.status, 'ok', 'a broken stream is not a broken connection')
 	})
 })
