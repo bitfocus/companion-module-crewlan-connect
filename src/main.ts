@@ -234,6 +234,29 @@ function sameJson(a: unknown, b: unknown): boolean {
 	return a === b || JSON.stringify(a) === JSON.stringify(b)
 }
 
+/**
+ * Order macro buttons the way CrewLAN asked for them.
+ *
+ * A macro that carries no usable `sortOrder` sorts after every macro that does, rather than as 0,
+ * so an incomplete server list degrades to label order instead of jumping to the front.
+ */
+function macroSortKey(macro: PublicMacroDto): number {
+	return typeof macro.sortOrder === 'number' && Number.isFinite(macro.sortOrder)
+		? macro.sortOrder
+		: Number.POSITIVE_INFINITY
+}
+
+export function compareMacros(a: PublicMacroDto, b: PublicMacroDto): number {
+	const aKey = macroSortKey(a)
+	const bKey = macroSortKey(b)
+
+	if (aKey !== bKey) {
+		return aKey < bKey ? -1 : 1
+	}
+
+	return a.label.localeCompare(b.label) || a.id.localeCompare(b.id)
+}
+
 /** Sleep that resolves early when the connection is torn down, so no timer outlives destroy(). */
 async function delay(ms: number, signal?: AbortSignal): Promise<void> {
 	if (signal?.aborted === true) {
@@ -284,6 +307,8 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	private streamRestartAttempt = 0
 	/** Serialises talk writes so a quick press/release can never be applied out of order. */
 	private talkQueue: Promise<void> = Promise.resolve()
+	/** The same for the listen channel, so a double-pressed mute toggle still ends up toggled. */
+	private listenQueue: Promise<void> = Promise.resolve()
 	/** When the response of the last local write was applied (for ordering against polls). */
 	private lastLocalWriteAt = 0
 	/** When `state.controls` was last refreshed from the server. */
@@ -340,7 +365,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		UpdateVariableValues(this)
 	}
 
-	/** Re-registers actions, feedbacks and presets; only needed when the selectable statuses change. */
+	/** Re-registers actions, feedbacks and presets; only needed when the buttons themselves change. */
 	updateDefinitions(): void {
 		this.registeredDefinitionsKey = this.definitionsKey()
 		this.updateActions()
@@ -374,11 +399,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	}
 
 	getRunnableMacros(): PublicMacroDto[] {
-		return this.state.macros
-			.filter((macro) => macro.runnable)
-			.sort(
-				(a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.label.localeCompare(b.label) || a.id.localeCompare(b.id),
-			)
+		return this.state.macros.filter((macro) => macro.runnable).sort(compareMacros)
 	}
 
 	getMacroChoices(): CrewLanChoice[] {
@@ -404,7 +425,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	// ---------------------------------------------------------------------------
 
 	/**
-	 * Rebuild the connection. It deliberately does not await the reconnect: a full snapshot is six
+	 * Rebuild the connection. It deliberately does not await the reconnect: a full snapshot is seven
 	 * requests and Companion abandons an action after 5 s. Progress is reported through the
 	 * instance status instead.
 	 */
@@ -507,35 +528,36 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	}
 
 	async setListenMuteMode(mode: 'toggle' | 'on' | 'off'): Promise<void> {
-		let nextMuted = mode === 'on'
+		// The target is decided inside the queue: two presses in quick succession must not both read
+		// the same held state and send the same value, which would leave the toggle where it was.
+		await this.enqueueListenWrite(async () => {
+			const muted = mode === 'toggle' ? (await this.currentControls())?.shoutbox.listen.muted !== true : mode === 'on'
 
-		if (mode === 'toggle') {
-			const controls = await this.currentControls()
-			nextMuted = controls?.shoutbox.listen.muted !== true
-		}
-
-		await this.patchControls({ shoutbox: { listen: { muted: nextMuted } } })
+			await this.patchControls({ shoutbox: { listen: { muted } } })
+		})
 	}
 
 	async setTalkLatchMode(mode: 'toggle' | 'on' | 'off'): Promise<void> {
-		let nextActive = mode === 'on'
+		await this.enqueueTalkWrite(async () => {
+			const active = mode === 'toggle' ? (await this.currentControls())?.shoutbox.talk.active !== true : mode === 'on'
 
-		if (mode === 'toggle') {
-			const controls = await this.currentControls()
-			nextActive = controls?.shoutbox.talk.active !== true
-		}
-
-		await this.setTalkState(nextActive, 'latch')
+			await this.writeTalkState(active, 'latch')
+		})
 	}
 
 	async setTalkState(active: boolean, controlMode: 'push' | 'latch'): Promise<void> {
 		await this.enqueueTalkWrite(async () => {
-			if (active) {
-				await this.patchControls({ shoutbox: { talk: { active: true, controlMode } } })
-			} else {
-				await this.releaseTalk(controlMode)
-			}
+			await this.writeTalkState(active, controlMode)
 		})
+	}
+
+	/** The talk write itself. Callers are responsible for running it inside the talk queue. */
+	private async writeTalkState(active: boolean, controlMode: 'push' | 'latch'): Promise<void> {
+		if (active) {
+			await this.patchControls({ shoutbox: { talk: { active: true, controlMode } } })
+		} else {
+			await this.releaseTalk(controlMode)
+		}
 	}
 
 	async dismissAlerts(): Promise<void> {
@@ -625,6 +647,9 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		this.generation++
 		this.api = null
 		this.pollInFlight = false
+		// The stream backoff belongs to the connection being torn down; a rebuilt connection starts
+		// its stream fresh, and a stale count here would also fake a "restarted" resync snapshot.
+		this.streamRestartAttempt = 0
 		this.clearReconnectTimer()
 		this.clearPollTimer()
 		this.clearStreamRestartTimer()
@@ -899,20 +924,16 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 				}
 				return
 			case 'macro.changed':
-				if (isPublicMacroDto(event.data)) {
-					this.applyMacroUpdate(event.data, Date.now())
-				} else {
-					this.log('debug', 'Ignoring macro.changed event with an unexpected payload.')
-				}
-
-				return
 			case 'macro.removed':
-				if (isPublicMacroRemovedEventData(event.data)) {
-					this.removeMacro(event.data.id)
-				} else {
-					this.log('debug', 'Ignoring macro.removed event with an unexpected payload.')
+				// The macro list endpoint decides whether this host has macros (see the 404 rule). A
+				// host that answers 404 there but still broadcasts macro events must not make macro
+				// buttons appear and vanish again on the next snapshot.
+				if (!this.state.macrosSupported) {
+					this.log('debug', `Ignoring ${event.type} from a CrewLAN without macro support.`)
+					return
 				}
 
+				this.applyMacroEvent(event)
 				return
 			case 'alert.triggered':
 				if (isPublicAlertTriggeredEventData(event.data)) {
@@ -923,6 +944,25 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 				return
 			default:
 				this.log('debug', `Ignoring unknown CrewLAN event type "${String(event.type)}".`)
+		}
+	}
+
+	/** Only reached once a snapshot has confirmed that this CrewLAN serves macros. */
+	private applyMacroEvent(event: PublicEventEnvelope): void {
+		if (event.type === 'macro.changed') {
+			if (isPublicMacroDto(event.data)) {
+				this.applyMacroUpdate(event.data, Date.now())
+			} else {
+				this.log('debug', 'Ignoring macro.changed event with an unexpected payload.')
+			}
+
+			return
+		}
+
+		if (isPublicMacroRemovedEventData(event.data)) {
+			this.removeMacro(event.data.id)
+		} else {
+			this.log('debug', 'Ignoring macro.removed event with an unexpected payload.')
 		}
 	}
 
@@ -1083,6 +1123,12 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	private async enqueueTalkWrite(write: () => Promise<void>): Promise<void> {
 		const run = this.talkQueue.then(write, write)
 		this.talkQueue = run.catch(() => undefined)
+		await run
+	}
+
+	private async enqueueListenWrite(write: () => Promise<void>): Promise<void> {
+		const run = this.listenQueue.then(write, write)
+		this.listenQueue = run.catch(() => undefined)
 		await run
 	}
 

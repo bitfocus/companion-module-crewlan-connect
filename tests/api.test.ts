@@ -225,6 +225,26 @@ describe('ServerSentEventParser', () => {
 
 		assert.throws(() => parser.push('x'.repeat(17)), /more than 1 MB/u)
 	})
+
+	it('gives up on a frame whose blank line never arrives, however many data lines it has', () => {
+		const parser = new ServerSentEventParser(32)
+
+		// Every line is terminated, so the buffer itself always drains; only the undelivered frame
+		// grows. A server that never writes the blank line must not be able to exhaust memory.
+		assert.throws(() => {
+			for (let attempt = 0; attempt < 10; attempt++) {
+				parser.push('data: 0123456789\n')
+			}
+		}, /more than 1 MB/u)
+	})
+
+	it('forgets the frame it dispatched, so a long stream of small events never trips the limit', () => {
+		const parser = new ServerSentEventParser(32)
+
+		for (let attempt = 0; attempt < 50; attempt++) {
+			assert.deepEqual(parser.push('data: 0123456789\n\n'), ['0123456789'])
+		}
+	})
 })
 
 describe('CrewLAN API client requests', () => {

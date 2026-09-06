@@ -3,6 +3,7 @@ import { describe, it } from 'node:test'
 import { InstanceStatus } from '@companion-module/base'
 import { CrewLanApiError } from '../src/api.js'
 import {
+	compareMacros,
 	computeReconnectDelayMs,
 	describeAlert,
 	feedbackIdsForGroups,
@@ -12,6 +13,7 @@ import {
 	reconnectBackoffMaxMs,
 	statusForError,
 } from '../src/main.js'
+import type { PublicMacroDto } from '../src/types.js'
 
 describe('reconnect backoff', () => {
 	it('grows exponentially and is capped', () => {
@@ -97,5 +99,43 @@ describe('alert descriptions', () => {
 
 	it('stays readable when the event carries no timestamp', () => {
 		assert.equal(describeAlert('', 'workspace'), 'Workspace alert at unknown time')
+	})
+})
+
+describe('macro ordering', () => {
+	const macro = (id: string, label: string, sortOrder?: number): PublicMacroDto => ({
+		id,
+		label,
+		colors: { backgroundColor: '#8e24aa', foregroundColor: '#ffffff' },
+		running: false,
+		runnable: true,
+		...(sortOrder === undefined ? {} : { sortOrder }),
+	})
+
+	it('follows the order CrewLAN asked for', () => {
+		const ordered = [macro('c', 'Third', 30), macro('a', 'First', 10), macro('b', 'Second', 20)].sort(compareMacros)
+
+		assert.deepEqual(
+			ordered.map((entry) => entry.id),
+			['a', 'b', 'c'],
+		)
+	})
+
+	it('sorts a macro without a sort order after every macro that has one', () => {
+		const ordered = [macro('zulu', 'Zulu'), macro('mike', 'Mike', 5), macro('alpha', 'Alpha')].sort(compareMacros)
+
+		assert.deepEqual(
+			ordered.map((entry) => entry.id),
+			['mike', 'alpha', 'zulu'],
+		)
+	})
+
+	it('breaks ties on label and then on id', () => {
+		const ordered = [macro('b', 'Same', 1), macro('a', 'Same', 1), macro('c', 'Другое', 1)].sort(compareMacros)
+
+		assert.deepEqual(
+			ordered.map((entry) => entry.id),
+			['a', 'b', 'c'],
+		)
 	})
 })

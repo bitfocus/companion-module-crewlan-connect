@@ -51,7 +51,8 @@ export interface PublicEntityDto {
 	id: string
 	type: 'participant' | 'device'
 	displayName: string
-	position: string | null
+	/** May be absent; the `entity_position` variable is then empty. */
+	position?: string | null
 	credentialRequired: boolean
 	lastSeenAt: string
 	status: PublicStatusDto
@@ -61,7 +62,8 @@ export interface PublicEntityStatusDto {
 	entityId: string
 	status: PublicStatusDto
 	selectedStatusId: string
-	updatedAt: string | null
+	/** May be absent; the freshness rules then fall back to request ordering. */
+	updatedAt?: string | null
 }
 
 export interface PublicEntityControlsDto {
@@ -81,7 +83,8 @@ export interface PublicEntityControlsDto {
 			available: boolean
 		}
 	}
-	updatedAt: string | null
+	/** May be absent; the freshness rules then fall back to request ordering. */
+	updatedAt?: string | null
 }
 
 export interface PublicDismissEntityAlertsDto {
@@ -110,10 +113,11 @@ export interface PublicMacroDto {
 	running: boolean
 	/** The analogue of PublicStatusDto.selectable: false hides the macro from Companion. */
 	runnable: boolean
-	/** Sort key; ties break on label, then id. */
-	sortOrder: number
-	runStartedAt: string | null
-	updatedAt: string | null
+	/** Sort key; ties break on label, then id. A macro without one sorts after all that have one. */
+	sortOrder?: number
+	runStartedAt?: string | null
+	/** May be absent; the freshness rules then fall back to request ordering. */
+	updatedAt?: string | null
 }
 
 export interface PublicMacroRemovedEventData {

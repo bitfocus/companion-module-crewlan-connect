@@ -92,13 +92,15 @@ async function startCrewLanStub(): Promise<Stub> {
 
 	const server = http.createServer((request, response) => {
 		const path = (request.url ?? '').split('?')[0] ?? ''
+		// Recorded before the offline branch: a test that asserts "no more requests" must be able to
+		// see the requests an offline host still receives, otherwise the assertion cannot fail.
+		stub.calls.push(`${request.method ?? 'GET'} ${path}`)
 
 		if (stub.offline) {
 			request.socket.destroy()
 			return
 		}
 
-		stub.calls.push(`${request.method ?? 'GET'} ${path}`)
 		let body = ''
 		request.on('data', (chunk) => (body += String(chunk)))
 		request.on('end', () => {
@@ -395,6 +397,20 @@ describe('module against a CrewLAN stub', () => {
 		assert.equal(host.variables.last_alert, '')
 	})
 
+	it('toggles twice when the operator presses a toggle twice in a row', async () => {
+		const before = stub.controls.shoutbox.listen.muted
+
+		// Both presses are started before either write has answered. Each has to decide against the
+		// state the previous one produced, or the button ends up where it started.
+		await Promise.all([
+			host.actions.listen_mute?.callback({ options: { mode: 'toggle' } }),
+			host.actions.listen_mute?.callback({ options: { mode: 'toggle' } }),
+		])
+
+		assert.equal(stub.controls.shoutbox.listen.muted, before)
+		assert.equal(host.variables.listen_muted, before)
+	})
+
 	it('applies live events and rechecks only the affected feedbacks', async () => {
 		host.checked.length = 0
 		const controls = {
@@ -576,6 +592,31 @@ describe('module against a CrewLAN without macro support', () => {
 		assert.equal(
 			host.registered.presets.some((id) => id.startsWith('macro_')),
 			false,
+		)
+	})
+
+	it('ignores macro events such a host has no business sending', async () => {
+		// The macro list answered 404, so this host has no macros. A macro event pushed anyway must
+		// not create a button that the next snapshot takes away again.
+		stub.stream?.write(
+			`data: ${JSON.stringify({
+				id: '90',
+				type: 'macro.changed',
+				occurredAt: laterIso(1000),
+				meta,
+				data: makeMacro('macro-ghost', 'Ghost'),
+			})}\n\n`,
+		)
+		await waitFor(
+			() => host.logs.some((line) => /Ignoring macro.changed from a CrewLAN without macro support/u.test(line)),
+			'the macro event to be ignored',
+		)
+
+		assert.equal(host.variables.macros_supported, false)
+		assert.equal(
+			host.registered.presets.some((id) => id.startsWith('macro_')),
+			false,
+			'no macro button appears',
 		)
 	})
 })

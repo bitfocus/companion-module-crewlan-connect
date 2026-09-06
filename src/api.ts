@@ -46,7 +46,10 @@ export const macroEventTypes = ['macro.changed', 'macro.removed'] as const
 export function subscribedEventTypes(includeMacros: boolean): string {
 	return (includeMacros ? [...baseEventTypes, ...macroEventTypes] : [...baseEventTypes]).join(',')
 }
-/** Largest amount of undelivered event-stream text the parser will hold before giving up. */
+/**
+ * Largest amount of undelivered event-stream text the parser will hold before giving up, counted in
+ * decoded characters. It covers both an unterminated line and a frame whose blank line never comes.
+ */
 export const maxEventStreamBufferBytes = 1024 * 1024
 
 export type CrewLanApiErrorKind =
@@ -203,20 +206,15 @@ function truncate(value: string, maxLength = 200): string {
 export class ServerSentEventParser {
 	private buffer = ''
 	private dataLines: string[] = []
+	/** Length of the `data` lines already accepted for the event that has not been dispatched yet. */
+	private pendingFrameLength = 0
 
 	constructor(private readonly maxBufferBytes = maxEventStreamBufferBytes) {}
 
 	/** Feed a chunk of text and receive the `data` payloads of every event completed by it. */
 	push(chunk: string): string[] {
 		this.buffer += chunk
-
-		if (this.buffer.length > this.maxBufferBytes) {
-			throw new CrewLanApiError(
-				'The CrewLAN event stream sent more than 1 MB without completing an event.',
-				null,
-				'invalid-response',
-			)
-		}
+		this.assertWithinLimit()
 
 		const payloads: string[] = []
 		let start = 0
@@ -260,6 +258,9 @@ export class ServerSentEventParser {
 		}
 
 		this.buffer = this.buffer.slice(start)
+		// A server that never writes the blank line would otherwise accumulate the whole stream in
+		// `dataLines`, where the buffer check above cannot see it.
+		this.assertWithinLimit()
 		return payloads
 	}
 
@@ -286,6 +287,20 @@ export class ServerSentEventParser {
 		return payloads
 	}
 
+	/**
+	 * Abort once an undelivered event would exceed the frame limit. Both halves count: the text of
+	 * the current line, and the `data` lines already accepted for the frame in progress.
+	 */
+	private assertWithinLimit(): void {
+		if (this.buffer.length + this.pendingFrameLength > this.maxBufferBytes) {
+			throw new CrewLanApiError(
+				'The CrewLAN event stream sent more than 1 MB without completing an event.',
+				null,
+				'invalid-response',
+			)
+		}
+	}
+
 	private processLine(line: string): string | null {
 		if (line.length === 0) {
 			if (this.dataLines.length === 0) {
@@ -294,6 +309,7 @@ export class ServerSentEventParser {
 
 			const payload = this.dataLines.join('\n')
 			this.dataLines = []
+			this.pendingFrameLength = 0
 			return payload
 		}
 
@@ -311,6 +327,8 @@ export class ServerSentEventParser {
 
 		if (field === 'data') {
 			this.dataLines.push(fieldValue)
+			// +1 for the newline the lines are joined with when the frame is dispatched.
+			this.pendingFrameLength += fieldValue.length + 1
 		}
 
 		return null
@@ -699,12 +717,13 @@ export class CrewLanApiClient {
 	 */
 	private async errorMessage(response: Response, prefix: string): Promise<string> {
 		const fallback = `${prefix} with HTTP ${String(response.status)}.`
+		let timer: NodeJS.Timeout | undefined
 
 		try {
 			const body: unknown = await Promise.race([
 				response.json(),
 				new Promise<never>((_resolve, reject) => {
-					setTimeout(() => {
+					timer = setTimeout(() => {
 						void response.body?.cancel().catch(() => undefined)
 						reject(new Error('error body timed out'))
 					}, errorBodyTimeoutMs)
@@ -722,6 +741,9 @@ export class CrewLanApiClient {
 			}
 		} catch {
 			// Keep the HTTP fallback message.
+		} finally {
+			// A fast body must not leave a pending timer holding the event loop open.
+			clearTimeout(timer)
 		}
 
 		return fallback

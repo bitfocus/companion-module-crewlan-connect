@@ -174,7 +174,7 @@ export function UpdateActions(self: ModuleInstance): void {
 			description: 'Rebuilds the CrewLAN connection. Progress is shown by the connection status, not by the button.',
 			options: [],
 			callback: () => {
-				// Deliberately not awaited: a full reconnect is six requests and Companion abandons any
+				// Deliberately not awaited: a full reconnect is seven requests and Companion abandons any
 				// action that runs longer than 5 s.
 				self.refreshCrewLan()
 			},
