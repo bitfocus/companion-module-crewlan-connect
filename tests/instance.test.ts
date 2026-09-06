@@ -108,6 +108,22 @@ async function startCrewLanStub(): Promise<Stub> {
 			}
 
 			if (path === '/api/v1/events') {
+				// The real CrewLAN rejects a subscription naming an event type it does not know.
+				const requestedTypes = new URL(request.url ?? '', 'http://stub').searchParams.get('types') ?? ''
+				const known = new Set([
+					'status.changed',
+					'alert.triggered',
+					'entity.controls.changed',
+					...(stub.macrosSupported ? ['macro.changed', 'macro.removed'] : []),
+				])
+				const unknown = requestedTypes.split(',').filter((type) => type.length > 0 && !known.has(type))
+
+				if (unknown.length > 0) {
+					response.writeHead(400, { 'content-type': 'application/json' })
+					response.end(JSON.stringify({ error: 'bad_request', message: `Unsupported event type '${unknown[0]}'.` }))
+					return
+				}
+
 				response.writeHead(200, { 'content-type': 'text/event-stream' })
 				response.write('retry: 1000\n\n: heartbeat\n\n')
 				stub.stream = response
@@ -544,6 +560,7 @@ describe('module against a CrewLAN without macro support', () => {
 			entityToken: 'cle_test',
 		})
 		await waitFor(() => host.status === 'ok', 'the connection to report ok')
+		await waitFor(() => host.variables.event_stream_connected === true, 'the event stream to connect')
 	})
 
 	after(async () => {
@@ -553,6 +570,7 @@ describe('module against a CrewLAN without macro support', () => {
 
 	it('connects anyway and simply offers no macro buttons', () => {
 		assert.equal(host.status, 'ok')
+		assert.equal(host.variables.event_stream_connected, true, 'the event stream still opens')
 		assert.equal(host.variables.macros_supported, false)
 		assert.equal(
 			host.registered.presets.some((id) => id.startsWith('macro_')),

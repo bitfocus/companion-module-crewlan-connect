@@ -716,6 +716,9 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			.streamEvents({
 				signal: controller.signal,
 				idleTimeoutMs: eventStreamIdleTimeoutMs,
+				// The snapshot has already run, so this is known. A host that grows macro support later
+				// is picked up by the poll, and its events on the next reconnect.
+				includeMacroEvents: this.state.macrosSupported,
 				onOpen: () => this.handleStreamOpen(generation),
 				onEvent: (event) => {
 					if (generation === this.generation) {

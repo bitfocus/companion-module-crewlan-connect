@@ -39,14 +39,20 @@ export const defaultReadBackTimeoutMs = 1500
 export const errorBodyTimeoutMs = 1000
 /** Default deadline for receiving the response headers of the event stream. */
 export const defaultStreamConnectTimeoutMs = 10000
-/** The event types the module subscribes to on the CrewLAN event stream. */
-export const subscribedEventTypes = [
-	'status.changed',
-	'alert.triggered',
-	'entity.controls.changed',
-	'macro.changed',
-	'macro.removed',
-].join(',')
+/** The event types every CrewLAN knows. */
+export const baseEventTypes = ['status.changed', 'alert.triggered', 'entity.controls.changed'] as const
+/** The event types only a CrewLAN with macro support knows. */
+export const macroEventTypes = ['macro.changed', 'macro.removed'] as const
+
+/**
+ * Build the `types` query for the event stream.
+ *
+ * CrewLAN rejects the whole subscription when it is asked for an event type it does not know, so
+ * the macro events are only requested once a host has shown that it has macros.
+ */
+export function subscribedEventTypes(includeMacros: boolean): string {
+	return (includeMacros ? [...baseEventTypes, ...macroEventTypes] : [...baseEventTypes]).join(',')
+}
 /** Largest amount of undelivered event-stream text the parser will hold before giving up. */
 export const maxEventStreamBufferBytes = 1024 * 1024
 
@@ -112,6 +118,8 @@ export interface StreamEventsOptions {
 	 * 0 disables the watchdog.
 	 */
 	idleTimeoutMs?: number
+	/** Subscribe to the macro events as well. Only safe against a host that has macro support. */
+	includeMacroEvents?: boolean
 }
 
 export interface SetEntityStatusResult {
@@ -510,10 +518,13 @@ export class CrewLanApiClient {
 		let response: Response
 
 		try {
-			response = await fetch(`${this.baseUrl}/api/v1/events?types=${subscribedEventTypes}`, {
-				headers: this.headers({ accept: 'text/event-stream' }),
-				signal: fetchAbort.signal,
-			})
+			response = await fetch(
+				`${this.baseUrl}/api/v1/events?types=${subscribedEventTypes(options.includeMacroEvents === true)}`,
+				{
+					headers: this.headers({ accept: 'text/event-stream' }),
+					signal: fetchAbort.signal,
+				},
+			)
 		} catch (error) {
 			signal.removeEventListener('abort', abortFetch)
 

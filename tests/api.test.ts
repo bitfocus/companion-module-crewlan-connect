@@ -699,19 +699,29 @@ describe('CrewLAN API client macros', () => {
 		)
 	})
 
-	it('subscribes to the macro events on the stream', async () => {
-		let requestedUrl = ''
+	it('subscribes to the macro events only when the host has macro support', async () => {
+		const requestedUrls: string[] = []
+		const capture: FetchMock = async (input) => {
+			requestedUrls.push(requestUrl(input))
 
-		await withFetch(
-			async (input) => {
-				requestedUrl = requestUrl(input)
+			return streamResponse([])
+		}
 
-				return streamResponse([])
-			},
-			async () => createClient().streamEvents({ signal: new AbortController().signal, onEvent: () => undefined }),
+		await withFetch(capture, async () =>
+			createClient().streamEvents({ signal: new AbortController().signal, onEvent: () => undefined }),
+		)
+		await withFetch(capture, async () =>
+			createClient().streamEvents({
+				signal: new AbortController().signal,
+				includeMacroEvents: true,
+				onEvent: () => undefined,
+			}),
 		)
 
-		assert.match(requestedUrl, /types=.*macro\.changed/u)
-		assert.match(requestedUrl, /types=.*macro\.removed/u)
+		// CrewLAN rejects a subscription that names an event type it does not know, so asking a host
+		// without macros for macro events would take the whole stream down.
+		assert.doesNotMatch(requestedUrls[0] ?? '', /macro\./u)
+		assert.match(requestedUrls[0] ?? '', /types=status\.changed,alert\.triggered,entity\.controls\.changed$/u)
+		assert.match(requestedUrls[1] ?? '', /types=.*macro\.changed,macro\.removed$/u)
 	})
 })
