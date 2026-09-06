@@ -720,36 +720,60 @@ export class CrewLanApiClient {
 	/**
 	 * Best-effort read of the server's error message. The body gets its own short deadline because a
 	 * stalled error body would otherwise hang the caller with no way to cancel it.
+	 *
+	 * The body is read through a reader this method owns rather than through `response.json()`,
+	 * because the deadline has to be able to destroy the socket, and `json()` locks the body: a
+	 * `response.body.cancel()` behind it rejects as "locked" and cancels nothing. On the event
+	 * stream nothing else would close that socket either, because the handshake deadline is already
+	 * cleared once the response headers have arrived.
 	 */
 	private async errorMessage(response: Response, prefix: string): Promise<string> {
 		const fallback = `${prefix} with HTTP ${String(response.status)}.`
-		let timer: NodeJS.Timeout | undefined
+		const body = response.body
+
+		if (body === null) {
+			return fallback
+		}
+
+		const reader = body.getReader()
+		// Cancelling a reader we hold ourselves does tear the socket down, which is the whole point.
+		const timer = setTimeout(() => {
+			void reader.cancel().catch(() => undefined)
+		}, errorBodyTimeoutMs)
 
 		try {
-			const body: unknown = await Promise.race([
-				response.json(),
-				new Promise<never>((_resolve, reject) => {
-					timer = setTimeout(() => {
-						void response.body?.cancel().catch(() => undefined)
-						reject(new Error('error body timed out'))
-					}, errorBodyTimeoutMs)
-				}),
-			])
+			const decoder = new TextDecoder()
+			let text = ''
+
+			for (;;) {
+				const chunk = await reader.read()
+
+				if (chunk.done) {
+					break
+				}
+
+				text += decoder.decode(chunk.value, { stream: true })
+			}
+
+			const parsed: unknown = JSON.parse(text)
 
 			if (
-				typeof body === 'object' &&
-				body !== null &&
-				'message' in body &&
-				typeof body.message === 'string' &&
-				body.message.trim().length > 0
+				typeof parsed === 'object' &&
+				parsed !== null &&
+				'message' in parsed &&
+				typeof parsed.message === 'string' &&
+				parsed.message.trim().length > 0
 			) {
-				return body.message
+				return parsed.message
 			}
 		} catch {
-			// Keep the HTTP fallback message.
+			// Keep the HTTP fallback message: a truncated, non-JSON or absent body is not an error of
+			// its own, the HTTP status already carries the failure.
 		} finally {
-			// A fast body must not leave a pending timer holding the event loop open.
+			// A fast body must not leave a pending timer holding the event loop open, and a body that
+			// is still open here must not outlive the response.
 			clearTimeout(timer)
+			await reader.cancel().catch(() => undefined)
 		}
 
 		return fallback

@@ -606,14 +606,21 @@ describe('CrewLAN API client transport classification', () => {
 		)
 	})
 
-	it('does not hang when the error body of a rejected stream never completes', async () => {
+	it('does not hang on the error body of a rejected stream that never completes, and cancels it', async () => {
 		const controller = new AbortController()
+		let cancelled = false
 
 		await withFetch(
 			async () =>
 				new Response(
 					new ReadableStream<Uint8Array>({
-						start: () => undefined,
+						start: (stream) => {
+							// The shape a proxy produces: a JSON error body that starts and then stalls.
+							stream.enqueue(new TextEncoder().encode('{"mess'))
+						},
+						cancel: () => {
+							cancelled = true
+						},
 					}),
 					{ status: 502, headers: { 'content-type': 'application/json' } },
 				),
@@ -621,6 +628,39 @@ describe('CrewLAN API client transport classification', () => {
 				await assert.rejects(
 					createClient().streamEvents({ signal: controller.signal, onEvent: () => undefined }),
 					(error: unknown) => error instanceof CrewLanApiError && error.statusCode === 502,
+				)
+			},
+		)
+
+		// Nothing else would ever close this body: the handshake deadline is cleared as soon as the
+		// response headers arrive, and the fetch is detached from the caller's signal as the error is
+		// thrown. A body left open here is held for as long as the server holds it, once per retry.
+		assert.equal(cancelled, true, 'the stalled error body was cancelled rather than left open')
+	})
+
+	it('still reports the server message when the error body arrives in several chunks', async () => {
+		const controller = new AbortController()
+
+		await withFetch(
+			async () =>
+				new Response(
+					new ReadableStream<Uint8Array>({
+						start(stream) {
+							const encoder = new TextEncoder()
+							stream.enqueue(encoder.encode('{"error":"entity_access_required",'))
+							stream.enqueue(encoder.encode('"message":"Entity access is required."}'))
+							stream.close()
+						},
+					}),
+					{ status: 401, headers: { 'content-type': 'application/json' } },
+				),
+			async () => {
+				await assert.rejects(
+					createClient().streamEvents({ signal: controller.signal, onEvent: () => undefined }),
+					(error: unknown) =>
+						error instanceof CrewLanApiError &&
+						error.statusCode === 401 &&
+						error.message === 'Entity access is required.',
 				)
 			},
 		)
