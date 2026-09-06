@@ -1,112 +1,570 @@
-import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import assert from 'node:assert/strict'
+import { describe, it } from 'node:test'
 import {
-  CrewLanApiClient,
-  CrewLanApiError,
-  normalizeBaseUrl,
-  parseServerSentEvents,
-} from "../src/api.js";
+	CrewLanApiClient,
+	CrewLanApiError,
+	ServerSentEventParser,
+	normalizeBaseUrl,
+	parseServerSentEvents,
+	type CrewLanApiLogger,
+} from '../src/api.js'
 
-describe("CrewLAN API client helpers", () => {
-  it("normalizes base URLs", () => {
-    assert.equal(normalizeBaseUrl("http://127.0.0.1:4848///"), "http://127.0.0.1:4848");
-    assert.equal(
-      normalizeBaseUrl("http://crewlan.local:4848/api///?debug=1#hash"),
-      "http://crewlan.local:4848",
-    );
-    assert.equal(
-      normalizeBaseUrl("http://crewlan.local:4848/api/v1"),
-      "http://crewlan.local:4848",
-    );
-  });
+type FetchMock = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
-  it("rejects invalid base URLs with useful errors", () => {
-    assert.throws(() => normalizeBaseUrl("not a url"), CrewLanApiError);
-    assert.throws(() => normalizeBaseUrl("ftp://crewlan.local"), /http:\/\/ or https:\/\//u);
-  });
+function jsonResponse(body: unknown, status = 200): Response {
+	return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+}
 
-  it("parses complete server-sent events and ignores comments", () => {
-    const events = parseServerSentEvents(
-      [
-        ": keepalive",
-        "",
-        "id: 1",
-        "event: status.changed",
-        "data: {\"type\":\"status.changed\",\"data\":{\"entityId\":\"alex\"}}",
-        "",
-      ].join("\n"),
-    );
+function streamResponse(chunks: string[]): Response {
+	const encoder = new TextEncoder()
 
-    assert.equal(events.length, 1);
-    assert.equal(events[0]?.type, "status.changed");
-  });
+	return new Response(
+		new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const chunk of chunks) {
+					controller.enqueue(encoder.encode(chunk))
+				}
 
-  it("parses multiline CRLF server-sent event data", () => {
-    const events = parseServerSentEvents(
-      [
-        "id: 2",
-        "event: status.changed",
-        'data: {"type":"status.changed",',
-        'data: "data":{"entityId":"alex"}}',
-        "",
-      ].join("\r\n"),
-    );
+				controller.close()
+			},
+		}),
+		{ status: 200, headers: { 'content-type': 'text/event-stream' } },
+	)
+}
 
-    assert.equal(events.length, 1);
-    assert.equal(events[0]?.type, "status.changed");
-    assert.deepEqual(events[0]?.data, { entityId: "alex" });
-  });
+function silentStreamResponse(): Response {
+	return new Response(new ReadableStream<Uint8Array>({ start: () => undefined }), { status: 200 })
+}
 
-  it("dismisses entity alerts through the Public API", async () => {
-    const originalFetch = globalThis.fetch;
-    let requestedUrl = "";
-    let requestedMethod = "";
-    let requestedAuthorization = "";
+async function withFetch<T>(mock: FetchMock, run: () => Promise<T>): Promise<T> {
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = mock
 
-    globalThis.fetch = async (input, init) => {
-      requestedUrl = String(input);
-      requestedMethod = String(init?.method ?? "GET");
-      requestedAuthorization = String(new Headers(init?.headers).get("authorization") ?? "");
+	try {
+		return await run()
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+}
 
-      return new Response(
-        JSON.stringify({
-          data: {
-            status: "updated",
-            entityId: "participant-alex",
-            dismissedCount: 2,
-          },
-          meta: {
-            apiVersion: "v1",
-            revision: 14,
-          },
-        }),
-        {
-          status: 200,
-          headers: {
-            "content-type": "application/json",
-          },
-        },
-      );
-    };
+function requestUrl(input: string | URL | Request): string {
+	return input instanceof Request ? input.url : String(input)
+}
 
-    try {
-      const client = new CrewLanApiClient({
-        baseUrl: "http://127.0.0.1:4848",
-        token: "cle_test-token",
-      });
-      const result = await client.dismissEntityAlerts("participant-alex");
+function createClient(logger?: CrewLanApiLogger, timeoutMs?: number): CrewLanApiClient {
+	return new CrewLanApiClient({
+		baseUrl: 'http://127.0.0.1:4848',
+		token: 'cle_test-token',
+		...(timeoutMs === undefined ? {} : { timeoutMs }),
+		...(logger === undefined ? {} : { logger }),
+	})
+}
 
-      assert.equal(
-        requestedUrl,
-        "http://127.0.0.1:4848/api/v1/entities/participant-alex/alerts/dismiss",
-      );
-      assert.equal(requestedMethod, "POST");
-      assert.equal(requestedAuthorization, "Bearer cle_test-token");
-      assert.equal(result.status, "updated");
-      assert.equal(result.entityId, "participant-alex");
-      assert.equal(result.dismissedCount, 2);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-});
+interface RecordingLogger extends CrewLanApiLogger {
+	debugMessages: string[]
+	warnMessages: string[]
+}
+
+function createLogger(): RecordingLogger {
+	const debugMessages: string[] = []
+	const warnMessages: string[] = []
+
+	return {
+		debugMessages,
+		warnMessages,
+		debug: (message) => {
+			debugMessages.push(message)
+		},
+		warn: (message) => {
+			warnMessages.push(message)
+		},
+	}
+}
+
+const meta = { apiVersion: 'v1', revision: 14 }
+
+const entityStatus = {
+	entityId: 'participant-alex',
+	status: {
+		id: 'sys-green',
+		kind: 'system',
+		label: 'OK',
+		paletteKey: 'green',
+		colors: { backgroundColor: '#0f8f4f', foregroundColor: '#ffffff' },
+		alertType: null,
+		motionPreset: 'none',
+		selectable: true,
+	},
+	selectedStatusId: 'sys-green',
+	updatedAt: '2026-08-03T18:44:41.000Z',
+}
+
+function eventFrame(type: string, data: unknown, id = '1'): string {
+	return `id: ${id}\nevent: ${type}\ndata: ${JSON.stringify({ id, type, occurredAt: '2026-08-03T18:44:41.000Z', data, meta })}\n\n`
+}
+
+describe('CrewLAN API client helpers', () => {
+	it('normalizes base URLs', () => {
+		assert.equal(normalizeBaseUrl('http://127.0.0.1:4848///'), 'http://127.0.0.1:4848')
+		assert.equal(normalizeBaseUrl('http://crewlan.local:4848/api///?debug=1#hash'), 'http://crewlan.local:4848')
+		assert.equal(normalizeBaseUrl('http://crewlan.local:4848/api/v1'), 'http://crewlan.local:4848')
+	})
+
+	it('drops credentials embedded in the address', () => {
+		assert.equal(normalizeBaseUrl('http://user:secret@crewlan.local:4848'), 'http://crewlan.local:4848')
+	})
+
+	it('keeps a reverse-proxy sub-path but drops a trailing API path', () => {
+		assert.equal(normalizeBaseUrl('http://host:4848/crewlan'), 'http://host:4848/crewlan')
+		assert.equal(normalizeBaseUrl('http://host:4848/crewlan/api/v1/'), 'http://host:4848/crewlan')
+		assert.equal(normalizeBaseUrl('http://host:4848/crewlan/api'), 'http://host:4848/crewlan')
+	})
+
+	it('rejects invalid base URLs with useful errors', () => {
+		assert.throws(() => normalizeBaseUrl('not a url'), CrewLanApiError)
+		assert.throws(() => normalizeBaseUrl('ftp://crewlan.local'), /http:\/\/ or https:\/\//u)
+	})
+
+	it('parses complete server-sent events and ignores comments', () => {
+		const events = parseServerSentEvents(
+			[
+				'retry: 1000',
+				'',
+				': heartbeat 1754246681000',
+				'',
+				...eventFrame('status.changed', entityStatus).split('\n'),
+			].join('\n'),
+		)
+
+		assert.equal(events.length, 1)
+		assert.equal(events[0]?.type, 'status.changed')
+	})
+
+	it('parses multiline CRLF server-sent event data', () => {
+		const events = parseServerSentEvents(
+			[
+				'id: 2',
+				'event: status.changed',
+				'data: {"id":"2","type":"status.changed","occurredAt":"2026-08-03T18:44:41.000Z",',
+				'data: "data":{"entityId":"alex"},"meta":{"apiVersion":"v1","revision":2}}',
+				'',
+			].join('\r\n'),
+		)
+
+		assert.equal(events.length, 1)
+		assert.equal(events[0]?.type, 'status.changed')
+		assert.deepEqual(events[0]?.data, { entityId: 'alex' })
+	})
+
+	it('skips malformed frames and reports them to the logger', () => {
+		const logger = createLogger()
+		const events = parseServerSentEvents('data: {not json\n\ndata: {"type":"x"}\n\n', logger)
+
+		assert.equal(events.length, 0)
+		assert.equal(logger.debugMessages.length, 2)
+	})
+})
+
+describe('ServerSentEventParser', () => {
+	it('keeps a CRLF split across chunks as one line break', () => {
+		const parser = new ServerSentEventParser()
+		const first = parser.push('data: {"a":1}\r')
+		const second = parser.push('\ndata: {"b":2}\r\n\r\n')
+
+		assert.deepEqual(first, [])
+		assert.deepEqual(second, ['{"a":1}\n{"b":2}'])
+	})
+
+	it('accepts lone carriage returns as line terminators', () => {
+		const parser = new ServerSentEventParser()
+
+		assert.deepEqual(parser.push('data: one\r\rdata: two\r\r'), ['one'])
+		// The trailing \r is held back until it is clear it is not the first half of \r\n.
+		assert.deepEqual(parser.flush(), ['two'])
+	})
+
+	it('holds partial events until they complete', () => {
+		const parser = new ServerSentEventParser()
+
+		assert.deepEqual(parser.push('data: {"a"'), [])
+		assert.deepEqual(parser.push(':1}\n'), [])
+		assert.deepEqual(parser.push('\n'), ['{"a":1}'])
+	})
+
+	it('flushes a trailing event without a final blank line', () => {
+		const parser = new ServerSentEventParser()
+
+		assert.deepEqual(parser.push('data: tail'), [])
+		assert.deepEqual(parser.flush(), ['tail'])
+	})
+
+	it('gives up when the buffer grows without an event boundary', () => {
+		const parser = new ServerSentEventParser(16)
+
+		assert.throws(() => parser.push('x'.repeat(17)), /more than 1 MB/u)
+	})
+})
+
+describe('CrewLAN API client requests', () => {
+	it('dismisses entity alerts through the Public API', async () => {
+		let requestedUrl = ''
+		let requestedMethod = ''
+		let requestedAuthorization = ''
+
+		const result = await withFetch(
+			async (input, init) => {
+				requestedUrl = requestUrl(input)
+				requestedMethod = String(init?.method ?? 'GET')
+				requestedAuthorization = String(new Headers(init?.headers).get('authorization') ?? '')
+
+				return jsonResponse({ data: { status: 'updated', entityId: 'participant-alex', dismissedCount: 2 }, meta })
+			},
+			async () => createClient().dismissEntityAlerts('participant-alex'),
+		)
+
+		assert.equal(requestedUrl, 'http://127.0.0.1:4848/api/v1/entities/participant-alex/alerts/dismiss')
+		assert.equal(requestedMethod, 'POST')
+		assert.equal(requestedAuthorization, 'Bearer cle_test-token')
+		assert.equal(result.status, 'updated')
+		assert.equal(result.dismissedCount, 2)
+	})
+
+	it('times out requests that never answer', async () => {
+		await withFetch(
+			async (_input, init) =>
+				new Promise<Response>((_resolve, reject) => {
+					init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+				}),
+			async () => {
+				await assert.rejects(
+					createClient(undefined, 30).getSession(),
+					(error: unknown) =>
+						error instanceof CrewLanApiError && error.kind === 'timeout' && /30 ms/u.test(error.message),
+				)
+			},
+		)
+	})
+
+	it('reports caller cancellation separately from timeouts', async () => {
+		const controller = new AbortController()
+
+		await withFetch(
+			async (_input, init) =>
+				new Promise<Response>((_resolve, reject) => {
+					init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+				}),
+			async () => {
+				const pending = createClient().getSession({ signal: controller.signal })
+				controller.abort()
+				await assert.rejects(pending, (error: unknown) => error instanceof CrewLanApiError && error.kind === 'aborted')
+			},
+		)
+	})
+
+	it('turns a non-JSON 200 into an actionable error', async () => {
+		await withFetch(
+			async () => new Response('<html>captive portal</html>', { status: 200 }),
+			async () => {
+				await assert.rejects(
+					createClient().getSession(),
+					(error: unknown) =>
+						error instanceof CrewLanApiError &&
+						error.kind === 'invalid-response' &&
+						/check the address/u.test(error.message),
+				)
+			},
+		)
+	})
+
+	it('rejects payloads that do not match the expected shape', async () => {
+		const logger = createLogger()
+
+		await withFetch(
+			async () => jsonResponse({ data: { shoutbox: {} }, meta }),
+			async () => {
+				await assert.rejects(
+					createClient(logger).getEntityControls('participant-alex'),
+					(error: unknown) => error instanceof CrewLanApiError && error.kind === 'invalid-response',
+				)
+			},
+		)
+
+		assert.equal(logger.debugMessages.length, 1)
+	})
+
+	it('uses the server message for HTTP errors', async () => {
+		await withFetch(
+			async () =>
+				jsonResponse({ error: 'entity_access_required', message: 'Entity access is required.', statusCode: 401 }, 401),
+			async () => {
+				await assert.rejects(
+					createClient().getSession(),
+					(error: unknown) =>
+						error instanceof CrewLanApiError &&
+						error.kind === 'http' &&
+						error.statusCode === 401 &&
+						error.message === 'Entity access is required.',
+				)
+			},
+		)
+	})
+
+	it('describes unreachable hosts as network errors', async () => {
+		await withFetch(
+			async () => {
+				throw new TypeError('fetch failed', { cause: new Error('connect ECONNREFUSED 127.0.0.1:4848') })
+			},
+			async () => {
+				await assert.rejects(
+					createClient().getSession(),
+					(error: unknown) =>
+						error instanceof CrewLanApiError && error.kind === 'network' && /ECONNREFUSED/u.test(error.message),
+				)
+			},
+		)
+	})
+
+	it('re-reads the status after a successful PUT', async () => {
+		const methods: string[] = []
+
+		const result = await withFetch(
+			async (input, init) => {
+				methods.push(`${String(init?.method ?? 'GET')} ${requestUrl(input)}`)
+
+				if (init?.method === 'PUT') {
+					return jsonResponse({
+						data: { status: 'updated', entityId: 'participant-alex', selectedStatusId: 'sys-green', revision: 15 },
+						meta,
+					})
+				}
+
+				return jsonResponse({ data: entityStatus, meta })
+			},
+			async () => createClient().setEntityStatus('participant-alex', 'ok'),
+		)
+
+		assert.deepEqual(methods, [
+			'PUT http://127.0.0.1:4848/api/v1/entities/participant-alex/status',
+			'GET http://127.0.0.1:4848/api/v1/entities/participant-alex/status',
+		])
+		assert.equal(result.selectedStatusId, 'sys-green')
+		assert.equal(result.status?.status.id, 'sys-green')
+	})
+
+	it('keeps a successful PUT even when the re-read fails', async () => {
+		const logger = createLogger()
+
+		const result = await withFetch(
+			async (_input, init) => {
+				if (init?.method === 'PUT') {
+					return jsonResponse({
+						data: { status: 'updated', entityId: 'participant-alex', selectedStatusId: 'sys-green', revision: 15 },
+						meta,
+					})
+				}
+
+				return jsonResponse({ error: 'internal_error', message: 'Internal server error', statusCode: 500 }, 500)
+			},
+			async () => createClient(logger).setEntityStatus('participant-alex', 'ok'),
+		)
+
+		assert.equal(result.selectedStatusId, 'sys-green')
+		assert.equal(result.status, null)
+		assert.equal(logger.debugMessages.length, 1)
+	})
+})
+
+describe('CrewLAN API client event stream', () => {
+	it('delivers events split across chunk boundaries and resolves when the server closes', async () => {
+		const frame = eventFrame('status.changed', entityStatus).replace(/\n/gu, '\r\n')
+		const cut = frame.indexOf('\r\n\r\n') + 1
+		const received: string[] = []
+		let opened = 0
+
+		await withFetch(
+			async () => streamResponse([': connected\r\n\r\n', frame.slice(0, cut), frame.slice(cut)]),
+			async () =>
+				createClient().streamEvents({
+					signal: new AbortController().signal,
+					onOpen: () => {
+						opened++
+					},
+					onEvent: (event) => received.push(event.type),
+				}),
+		)
+
+		assert.equal(opened, 1)
+		assert.deepEqual(received, ['status.changed'])
+	})
+
+	it('survives a handler that throws and keeps reading', async () => {
+		const logger = createLogger()
+		const received: string[] = []
+
+		await withFetch(
+			async () =>
+				streamResponse([eventFrame('status.changed', entityStatus, '1'), eventFrame('alert.triggered', {}, '2')]),
+			async () =>
+				createClient(logger).streamEvents({
+					signal: new AbortController().signal,
+					onEvent: (event) => {
+						received.push(event.id)
+
+						if (event.id === '1') {
+							throw new Error('boom')
+						}
+					},
+				}),
+		)
+
+		assert.deepEqual(received, ['1', '2'])
+		assert.equal(logger.warnMessages.length, 1)
+	})
+
+	it('aborts a stream that goes silent for longer than the idle timeout', async () => {
+		await withFetch(
+			async () => silentStreamResponse(),
+			async () => {
+				await assert.rejects(
+					createClient().streamEvents({
+						signal: new AbortController().signal,
+						idleTimeoutMs: 30,
+						onEvent: () => undefined,
+					}),
+					(error: unknown) => error instanceof CrewLanApiError && error.kind === 'timeout',
+				)
+			},
+		)
+	})
+
+	it('resolves quietly when the caller aborts', async () => {
+		const controller = new AbortController()
+
+		await withFetch(
+			async (_input, init) => {
+				init?.signal?.addEventListener('abort', () => undefined)
+				return silentStreamResponse()
+			},
+			async () => {
+				const pending = createClient().streamEvents({
+					signal: controller.signal,
+					onEvent: () => undefined,
+				})
+				setTimeout(() => controller.abort(), 10)
+				await pending
+			},
+		)
+	})
+
+	it('reports a rejected stream with the HTTP status', async () => {
+		await withFetch(
+			async () => jsonResponse({ error: 'workspace_access_required', message: 'Workspace access is required.' }, 401),
+			async () => {
+				await assert.rejects(
+					createClient().streamEvents({ signal: new AbortController().signal, onEvent: () => undefined }),
+					(error: unknown) => error instanceof CrewLanApiError && error.statusCode === 401,
+				)
+			},
+		)
+	})
+})
+
+describe('CrewLAN API client event stream handshake', () => {
+	it('does not cut a healthy stream after the handshake deadline', async () => {
+		const received: string[] = []
+		const controller = new AbortController()
+		const encoder = new TextEncoder()
+
+		await withFetch(
+			async () =>
+				new Response(
+					new ReadableStream<Uint8Array>({
+						start(streamController) {
+							setTimeout(() => {
+								streamController.enqueue(encoder.encode(eventFrame('status.changed', entityStatus)))
+								streamController.close()
+							}, 60)
+						},
+					}),
+					{ status: 200 },
+				),
+			async () =>
+				createClient(undefined, 20).streamEvents({
+					signal: controller.signal,
+					onEvent: (event) => received.push(event.type),
+				}),
+		)
+
+		assert.deepEqual(received, ['status.changed'])
+	})
+
+	it('gives up on a handshake that never completes', async () => {
+		await withFetch(
+			async (_input, init) =>
+				new Promise<Response>((_resolve, reject) => {
+					init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+				}),
+			async () => {
+				await assert.rejects(
+					createClient(undefined, 20).streamEvents({ signal: new AbortController().signal, onEvent: () => undefined }),
+					(error: unknown) => error instanceof CrewLanApiError && error.kind === 'timeout',
+				)
+			},
+		)
+	})
+})
+
+describe('CrewLAN API client transport classification', () => {
+	it('reports a connection dropped mid-body as a network error, not a bad address', async () => {
+		await withFetch(
+			async () =>
+				new Response(
+					new ReadableStream<Uint8Array>({
+						start(controller) {
+							controller.enqueue(new TextEncoder().encode('{"data":'))
+							controller.error(new TypeError('terminated'))
+						},
+					}),
+					{ status: 200, headers: { 'content-type': 'application/json' } },
+				),
+			async () => {
+				await assert.rejects(
+					createClient().getSession(),
+					(error: unknown) => error instanceof CrewLanApiError && error.kind === 'network',
+				)
+			},
+		)
+	})
+
+	it('still reports a genuine non-JSON body as a bad address', async () => {
+		await withFetch(
+			async () => new Response('<html>captive portal</html>', { status: 200 }),
+			async () => {
+				await assert.rejects(
+					createClient().getSession(),
+					(error: unknown) => error instanceof CrewLanApiError && error.kind === 'invalid-response',
+				)
+			},
+		)
+	})
+
+	it('does not hang when the error body of a rejected stream never completes', async () => {
+		const controller = new AbortController()
+
+		await withFetch(
+			async () =>
+				new Response(
+					new ReadableStream<Uint8Array>({
+						start: () => undefined,
+					}),
+					{ status: 502, headers: { 'content-type': 'application/json' } },
+				),
+			async () => {
+				await assert.rejects(
+					createClient().streamEvents({ signal: controller.signal, onEvent: () => undefined }),
+					(error: unknown) => error instanceof CrewLanApiError && error.statusCode === 502,
+				)
+			},
+		)
+	})
+})

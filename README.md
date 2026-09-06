@@ -7,14 +7,29 @@ The module binds to exactly one CrewLAN entity through a CrewLAN entity token. I
 ## Configuration
 
 - `Address`: for example `http://192.168.1.20:4848`
-- `Token`: generated in CrewLAN for the entity that should be controlled
-- `Poll fallback`: backup refresh interval when the event stream reconnects
+- `Connection token`: generated in CrewLAN for the entity that should be controlled
+- `Poll fallback interval`: HTTP refresh interval used while the live event stream is unavailable; while the stream is connected the module only reconciles every 30 s
+
+See [companion/HELP.md](companion/HELP.md) for the user-facing documentation.
 
 ## Development
 
 ```sh
 yarn install
-yarn test
-yarn lint
-yarn build
+yarn lint            # eslint, using the shared Bitfocus config
+yarn test            # node:test suite (tests/)
+yarn build           # type-check and emit dist/
+yarn dev             # rebuild on change while Companion runs the module
+yarn package         # build the distributable .tgz with companion-module-build
 ```
+
+`yarn format` formats the repository with the shared Bitfocus Prettier config, and commits run `lint-staged` through a Husky pre-commit hook. `tsc -p tsconfig.json --noEmit` type-checks the tests as well as the sources.
+
+`scripts/module-version.mjs` holds this project's own release-naming rules (public two-number versions, CrewLAN download tags). Nothing in the repository calls it any more; it is kept for the external release process and covered by `tests/versioning.test.ts`.
+
+## Architecture
+
+- `src/main.ts` — the Companion instance: connection lifecycle, event stream, polling, state and publishing.
+- `src/api.ts` — the CrewLAN Public API v1 client: deadlines, error classification and the incremental event-stream parser.
+- `src/guards.ts` — runtime type guards applied to every payload at the API boundary.
+- `src/actions.ts`, `src/feedbacks.ts`, `src/variables.ts`, `src/presets.ts`, `src/config.ts`, `src/upgrades.ts` — the Companion surface.
