@@ -681,7 +681,7 @@ describe('module against a Public API v1 switched off', () => {
 		await new Promise<void>((resolve) => server.close(() => resolve()))
 	})
 
-	it("shows an authentication failure with the Core's sentence and asks again after 60 s", async () => {
+	it("shows an authentication failure with CrewLAN's sentence and asks again after 60 s", async () => {
 		await waitFor(() => host.status === 'authentication_failure', 'the authentication failure')
 		assert.ok(host.logs.some((line) => line.startsWith('status:authentication_failure') && line.endsWith(sentence)))
 		assert.ok(host.logs.some((line) => line === 'debug: Reconnecting to CrewLAN in 60000 ms.'))

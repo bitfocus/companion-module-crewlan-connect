@@ -265,9 +265,9 @@ export interface CrewLanChoice {
 }
 
 /*
- * The integration API `/api/v2` wire types (crewlan-v2 `docs/architecture.md` `### The integration
- * API`). The module translates them into the Public API v1 DTOs above at the API boundary
- * (`api-v2.ts`), so every action, feedback, variable and preset reads one state over both APIs.
+ * The integration API `/api/v2` wire types. The module translates them into the Public API v1
+ * DTOs above at the API boundary (`api-v2.ts`), so every action, feedback, variable and preset
+ * reads one state over both APIs.
  * The same two rules hold: a field `guards.ts` does not check is optional here.
  */
 
@@ -353,7 +353,7 @@ export interface IntegrationGroupList {
 	groups: IntegrationGroupView[]
 }
 
-/** An event envelope as `/api/v2/events` writes it (crewlan-v2 `docs/events.md` `## Event Envelope`). */
+/** An event envelope as `/api/v2/events` writes it. */
 export interface IntegrationEventEnvelope {
 	/** Not validated and unread: a gap is closed by a snapshot, never by a replay. */
 	id?: string

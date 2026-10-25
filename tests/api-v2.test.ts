@@ -53,7 +53,7 @@ describe('v2 translation', () => {
 		assert.equal(toV2StatusId('sts-0011'), 'sts-0011')
 	})
 
-	it('picks the foreground the Core picks for v1', () => {
+	it('picks the foreground v1 picks', () => {
 		for (const [background, expected] of [
 			['#ffffff', '#000000'],
 			['#ffd60a', '#000000'],
@@ -154,7 +154,7 @@ describe('v2 translation', () => {
 		assert.equal(isOwnerAbsentError(new CrewLanApiError('unknown', 401, 'http', 'connection_unknown')), false)
 	})
 
-	it("shows v1's compatibility_mode_off as an authentication failure with the Core's sentence, retried after 60 s", () => {
+	it("shows v1's compatibility_mode_off as an authentication failure with CrewLAN's sentence, retried after 60 s", () => {
 		const sentence =
 			'the v1 compatibility mode is off in this Workspace: an administrator switches it on in Administration, under Connections'
 		const error = new CrewLanApiError(sentence, 403, 'http', 'forbidden')
@@ -192,7 +192,7 @@ describe('v2 client against a fake /api/v2', () => {
 
 				if (path === '/api/v2') {
 					if (answerProbe === 404) {
-						json(404, { error: 'not_found', message: 'This Runtime serves /api/client.' })
+						json(404, { error: 'not_found', message: 'not found' })
 					} else if (answerProbe === 401) {
 						json(401, { error: 'connection_unknown', message: 'no connection has this token' })
 					} else if (answerProbe === 429) {

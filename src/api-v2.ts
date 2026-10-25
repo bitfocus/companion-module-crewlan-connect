@@ -42,14 +42,13 @@ import type {
 } from './types.js'
 
 /**
- * The CrewLAN integration API `/api/v2` client (crewlan-v2 `docs/architecture.md` `### The
- * integration API`).
+ * The CrewLAN integration API `/api/v2` client.
  *
  * It speaks through a `CrewLanApiClient`, so deadlines, error classification and the event-stream
  * transport are the v1 path's own, and it answers in the Public API v1 DTOs the rest of the module
- * reads: v2's built-in status words become v1's `sys-…` ids, colours get the foreground the Core's
- * own v1 translation computes (`crewlan-transport-http` `src/compat/`), and the intercom controls
- * become v1's one Global Talk and Output mute beside the `IntercomState` only v2 has.
+ * reads: v2's built-in status words become v1's `sys-…` ids, colours get the foreground v1
+ * computes for them, and the intercom controls become v1's one Global Talk and Output mute beside
+ * the `IntercomState` only v2 has.
  */
 
 /** Every event the module reads on `/api/v2/events`; one the Workspace does not know is ignored there. */
@@ -72,7 +71,7 @@ export const integrationEventTypes = [
 	'intercom.event.memberRemoved',
 ] as const
 
-/** v2's built-in status words and the v1 ids users' buttons keep, as the Core's v1 translation names them. */
+/** v2's built-in status words and the v1 ids users' buttons keep, as v1 names them. */
 const v1StatusIds: Readonly<Record<string, string>> = {
 	ready: 'sys-green',
 	attention: 'sys-yellow',
@@ -81,7 +80,7 @@ const v1StatusIds: Readonly<Record<string, string>> = {
 	offline: 'sys-offline',
 }
 
-/** The English name of each built-in status, which v2 does not send (`BuiltInStatus::english`). */
+/** The English name of each built-in status, which v2 does not send. */
 const builtInLabels: Readonly<Record<string, string>> = {
 	ready: 'OK',
 	attention: 'Attention',
@@ -103,7 +102,7 @@ export function toV2StatusId(id: string): string {
 	return Object.entries(v1StatusIds).find(([, legacy]) => legacy === id)?.[0] ?? id
 }
 
-/** How far a dimmed button darkens its colour: the foreground must read on both (`compat/status.rs`). */
+/** How far a dimmed button darkens its colour: the foreground must read on both, as on v1. */
 const dimmedFactor = 0.32
 
 function luminance(rgb: readonly number[]): number {
@@ -192,7 +191,7 @@ export function toPublicControls(entityId: string, controls: IntegrationIntercom
 				active: controls.globalTalk.held,
 				live: controls.audio.sending,
 				controlMode: controls.globalTalk.held ? controls.globalTalk.talkKey : null,
-				// The Core lets no talk key be held in a direct call (`compat/read.rs` `v1_controls`).
+				// No talk key can be held in a direct call.
 				available: controls.audio.connected && controls.call === null,
 			},
 		},
@@ -253,7 +252,7 @@ export function endedError(code: string): CrewLanApiError {
 /**
  * `GET /api/v2`: the description where the Workspace serves the integration API. Null — the
  * Public API v1 path, which then classifies the connection — on a `404` (a Workspace speaking v1
- * only, or a run whose edition offers neither), or on a success whose body is no v2 description
+ * only, or a Workspace whose edition offers neither), or on a success whose body is no v2 description
  * (an HTML page or another JSON body). Every other answer fails the connection as every request
  * does: a refusal such as `connection_unknown`, `connection_paused`, `address_blocked` or a `429`
  * (retried on the reconnect backoff), and no answer at all.

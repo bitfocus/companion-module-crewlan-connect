@@ -192,7 +192,7 @@ export function statusForError(error: unknown): InstanceStatus {
 /** Status text shown in the connection list; authentication details are kept out of it. */
 export function describeCompanionErrorForDisplay(error: unknown): string {
 	if (statusForError(error) === InstanceStatus.AuthenticationFailure) {
-		// A 403 with the Core's own sentence names what an administrator switched off and where it is
+		// A 403 with CrewLAN's own sentence names what an administrator switched off and where it is
 		// switched on again — v1's `compatibility_mode_off` — which is no secret of the token.
 		if (error instanceof CrewLanApiError && error.statusCode === 403 && error.code !== null) {
 			return `${authenticationFailedConnectionMessage} ${error.message}`
@@ -293,9 +293,8 @@ export function pickFresher<T extends { updatedAt?: string | null }>(
 /**
  * Whether the status shows the bound Entity present, over v1 and v2 alike. It is the later of two
  * measures: CrewLAN refuses the connection's writes from the moment no Client of the Entity is
- * attached, and shows it Offline only after the presence grace of 15 s a channel is given to
- * come back (crewlan-v2 `docs/architecture.md` `### The channel`). Unknown counts as present; a refusal holds the buttons grey
- * until a sign of presence (`ModuleInstance.presenceFrom`).
+ * attached, and shows it Offline only after a presence grace of 15 s. Unknown counts as present; a
+ * refusal holds the buttons grey until a sign of presence (`ModuleInstance.presenceFrom`).
  */
 function isEntityPresent(status: PublicEntityStatusDto | null): boolean {
 	return status?.status.id !== offlineStatusId
@@ -1290,9 +1289,9 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 
 	/**
 	 * Over v2, reads `intercom.query.getControls` every second while connected: the audio
-	 * connection and the microphone's sending change without an event a connection receives
-	 * (`audio.event.*` is recorded, never streamed), and v1's stream reads them 4×/s for the same
-	 * reason. One read a second stays far below the integration API's 20 requests/s.
+	 * connection and the microphone's sending change without an event the integration API streams,
+	 * and v1's stream reads them 4×/s for the same reason. One read a second stays far below the
+	 * integration API's 20 requests/s.
 	 */
 	private scheduleControlsRead(generation: number): void {
 		this.clearControlsTimer()
