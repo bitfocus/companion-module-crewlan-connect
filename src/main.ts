@@ -1,5 +1,6 @@
 import { InstanceBase, InstanceStatus, type InstanceTypes, type SomeCompanionConfigField } from '@companion-module/base'
 import { CrewLanApiClient, CrewLanApiError, isAbortError, type ControlsPatch, type RequestOptions } from './api.js'
+import { CrewLanV2Client, offlineStatusId, probeIntegrationApi, type IntegrationControlsBody } from './api-v2.js'
 import { UpdateActions, type ActionsSchema } from './actions.js'
 import {
 	GetConfigFields,
@@ -22,6 +23,8 @@ import { getCompanionStatusLabel } from './button-style.js'
 import type {
 	CrewLanChoice,
 	CrewLanState,
+	IntegrationEventEnvelope,
+	IntercomGroupState,
 	PublicEntityControlsDto,
 	PublicEntityStatusDto,
 	PublicEventEnvelope,
@@ -33,6 +36,8 @@ import { UpdateVariableDefinitions, UpdateVariableValues, type VariablesSchema }
 
 /** Reconciliation interval while the live event stream is healthy. */
 export const streamHealthyPollIntervalMs = 30_000
+/** How often a v2 connection reads its controls; see `scheduleControlsRead`. */
+export const integrationControlsReadIntervalMs = 1000
 /** CrewLAN writes a heartbeat comment every 15 s; three missed heartbeats mean the stream is dead. */
 export const eventStreamIdleTimeoutMs = 45_000
 export const reconnectBackoffBaseMs = 1000
@@ -61,14 +66,27 @@ const talkReleaseRetryDelaysMs = [250, 1000]
 
 export const authenticationFailedConnectionMessage = 'Could not establish a connection because authentication failed.'
 
-type StateGroup = 'connection' | 'status' | 'controls' | 'macros'
+type StateGroup = 'connection' | 'status' | 'controls' | 'macros' | 'intercom'
+
+/** What an action that needs `/api/v2` logs over the Public API v1, where it changes nothing. */
+export function needsIntegrationApiMessage(actionName: string): string {
+	return `${actionName} needs a CrewLAN Workspace serving /api/v2; this one speaks the Public API v1 and has only Global Talk and Output.`
+}
+
+/** The sentence CrewLAN gives a write while the connection's Entity is not present at a Client. */
+export const ownerAbsentMessage = 'CrewLAN rejects actions while the entity is not present.'
+
+/** Whether a refusal says the connection's Entity is not present at a Client — not a revoked token. */
+export function isOwnerAbsentError(error: unknown): boolean {
+	return error instanceof CrewLanApiError && error.statusCode === 401 && error.code === 'connection_owner_absent'
+}
 
 /**
  * Which slice of the state each feedback reads. Typed as an exhaustive record so a feedback added
  * to FeedbacksSchema without an entry here fails to compile instead of silently never being
  * re-checked. Only the feedbacks of the groups that actually changed are re-checked.
  */
-const feedbackStateGroups: Record<keyof FeedbacksSchema, StateGroup> = {
+const feedbackStateGroups: Record<keyof FeedbacksSchema, StateGroup | readonly StateGroup[]> = {
 	connection_ok: 'connection',
 	status_is: 'status',
 	status_style: 'status',
@@ -83,12 +101,24 @@ const feedbackStateGroups: Record<keyof FeedbacksSchema, StateGroup> = {
 	talk_live: 'controls',
 	macro_running: 'macros',
 	macro_style: 'macros',
+	// The readiness feedbacks read the connection (connected, owner present); the state ones do not.
+	connection_ready: 'connection',
+	input_muted: 'intercom',
+	group_talk_available: ['connection', 'intercom'],
+	group_talk_active: 'intercom',
+	group_muted: 'intercom',
+	call_ringing: 'intercom',
+	call_active: 'intercom',
+	answer_available: ['connection', 'intercom'],
+	group_member: ['connection', 'intercom'],
 }
 
 export function feedbackIdsForGroups(groups: ReadonlySet<StateGroup>): (keyof FeedbacksSchema)[] {
-	return (Object.keys(feedbackStateGroups) as (keyof FeedbacksSchema)[]).filter((id) =>
-		groups.has(feedbackStateGroups[id]),
-	)
+	return (Object.keys(feedbackStateGroups) as (keyof FeedbacksSchema)[]).filter((id) => {
+		const read = feedbackStateGroups[id]
+
+		return typeof read === 'string' ? groups.has(read) : read.some((group) => groups.has(group))
+	})
 }
 
 function createInitialState(): CrewLanState {
@@ -105,6 +135,9 @@ function createInitialState(): CrewLanState {
 		controls: null,
 		lastAlert: '',
 		lastError: '',
+		api: null,
+		ownerPresent: true,
+		intercom: null,
 	}
 }
 
@@ -159,6 +192,12 @@ export function statusForError(error: unknown): InstanceStatus {
 /** Status text shown in the connection list; authentication details are kept out of it. */
 export function describeCompanionErrorForDisplay(error: unknown): string {
 	if (statusForError(error) === InstanceStatus.AuthenticationFailure) {
+		// A 403 with the Core's own sentence names what an administrator switched off and where it is
+		// switched on again — v1's `compatibility_mode_off` — which is no secret of the token.
+		if (error instanceof CrewLanApiError && error.statusCode === 403 && error.code !== null) {
+			return `${authenticationFailedConnectionMessage} ${error.message}`
+		}
+
 		return authenticationFailedConnectionMessage
 	}
 
@@ -251,6 +290,17 @@ export function pickFresher<T extends { updatedAt?: string | null }>(
 	return incomingRequestedAt >= lastLocalWriteAt ? incoming : current
 }
 
+/**
+ * Whether the status shows the bound Entity present, over v1 and v2 alike. It is the later of two
+ * measures: CrewLAN refuses the connection's writes from the moment no Client of the Entity is
+ * attached, and shows it Offline only after the presence grace of 15 s a channel is given to
+ * come back (crewlan-v2 `docs/architecture.md` `### The channel`). Unknown counts as present; a refusal holds the buttons grey
+ * until a sign of presence (`ModuleInstance.presenceFrom`).
+ */
+function isEntityPresent(status: PublicEntityStatusDto | null): boolean {
+	return status?.status.id !== offlineStatusId
+}
+
 function sameJson(a: unknown, b: unknown): boolean {
 	return a === b || JSON.stringify(a) === JSON.stringify(b)
 }
@@ -312,7 +362,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	config!: ModuleConfig // Setup in init()
 
 	private entityToken = ''
-	private api: CrewLanApiClient | null = null
+	private api: CrewLanApiClient | CrewLanV2Client | null = null
 	private state: CrewLanState = createInitialState()
 
 	/** Bumped on every (re)connect and cleanup; stale async work compares against it and bails. */
@@ -321,6 +371,19 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	private streamAbort: AbortController | null = null
 	private pollTimer: NodeJS.Timeout | null = null
 	private pollInFlight = false
+	/** A snapshot was asked for while one was in flight; it runs once that one settles. */
+	private pollAgain = false
+	/** Over v2 the controls are read every second: nothing announces the audio connection's changes. */
+	private controlsTimer: NodeJS.Timeout | null = null
+	/**
+	 * Set while a write CrewLAN refused because the Entity is not present holds the buttons grey,
+	 * until a sign of presence: a status Offline shows only after the presence grace, so a snapshot
+	 * read inside it still shows the chosen status. It carries CrewLAN's own time of the status held
+	 * at the refusal, so a later status is told by CrewLAN's clock, never by this machine's.
+	 */
+	private ownerAbsence: { statusAt: number } | null = null
+	/** The caller ids whose names the snapshot was read again for, each asked once per connection. */
+	private callerNamesAsked = new Set<string>()
 	private reconnectTimer: NodeJS.Timeout | null = null
 	private reconnectAttempt = 0
 	private streamRestartTimer: NodeJS.Timeout | null = null
@@ -336,6 +399,10 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	private lastLocalWriteAt = 0
 	/** When `state.controls` was last refreshed from the server. */
 	private controlsRefreshedAt = 0
+	/** Over v2, when each macro's last run event arrived, so an older snapshot does not undo it. */
+	private macroRunEventAt = new Map<string, number>()
+	/** When the groups, with the Entity's own listening of each, were last read. */
+	private groupsRefreshedAt = 0
 	private registeredDefinitionsKey: string | null = null
 	private instanceStatus: InstanceStatus | null = null
 	private instanceStatusMessage: string | null = null
@@ -496,6 +563,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		}
 
 		this.lastLocalWriteAt = Date.now()
+		this.notePresent()
 		// The write succeeded but could not be re-read: reflect it from the local status list until
 		// the next event or poll settles it.
 		const applied =
@@ -546,7 +614,15 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		}
 
 		this.lastLocalWriteAt = Date.now()
-		this.applyMacroUpdate(macro, this.lastLocalWriteAt)
+		this.notePresent()
+		// Over v2 a run leaves the macro's updatedAt as it was, so its answer, arriving after a fast
+		// run's macroRunEnded, would light it again: there `running` comes from the run events and
+		// the snapshot alone.
+		const held = this.state.macros.find((candidate) => candidate.id === macro.id)
+		this.applyMacroUpdate(
+			api instanceof CrewLanV2Client ? { ...macro, running: held?.running ?? false } : macro,
+			this.lastLocalWriteAt,
+		)
 		this.updateState({ lastError: '' })
 	}
 
@@ -579,8 +655,207 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		if (active) {
 			await this.patchControls({ shoutbox: { talk: { active: true, controlMode } } })
 		} else {
-			await this.releaseTalk(controlMode)
+			await this.releaseTalk(`Global Talk (${controlMode})`, async (options) => {
+				await this.patchControls({ shoutbox: { talk: { active: false, controlMode: null } } }, options)
+			})
 		}
+	}
+
+	/** The input mute (*Input*), v2 only; decided inside the listen queue, as Output's toggle is. */
+	async setInputMuteMode(mode: 'toggle' | 'on' | 'off'): Promise<void> {
+		const api = this.requireIntegrationApi('Input')
+
+		if (api === null) {
+			return
+		}
+
+		await this.enqueueListenWrite(async () => {
+			const inputMuted = mode === 'toggle' ? this.state.intercom?.inputMuted !== true : mode === 'on'
+
+			await this.writeIntegrationControls(api, { inputMuted })
+		})
+	}
+
+	/**
+	 * Holds (`held`) or lets go one group's talk key, `push` or `latch`, v2 only. Letting go is sent
+	 * and retried as Global Talk's release is: a lost release leaves the microphone open.
+	 */
+	async setGroupTalk(groupId: string, held: boolean, talkKey: 'push' | 'latch'): Promise<void> {
+		const api = this.requireIntegrationApi('Talk')
+
+		if (api === null) {
+			return
+		}
+
+		await this.enqueueTalkWrite(async () => {
+			await this.writeGroupTalk(api, groupId, held, talkKey)
+		})
+	}
+
+	/** Latches, unlatches or toggles one group's talk key, decided inside the talk queue, v2 only. */
+	async setGroupTalkLatchMode(groupId: string, mode: 'toggle' | 'on' | 'off'): Promise<void> {
+		const api = this.requireIntegrationApi('Talk')
+
+		if (api === null) {
+			return
+		}
+
+		await this.enqueueTalkWrite(async () => {
+			const held =
+				mode === 'toggle'
+					? this.state.intercom?.groups.find((group) => group.id === groupId)?.talkHeld !== true
+					: mode === 'on'
+
+			await this.writeGroupTalk(api, groupId, held, 'latch')
+		})
+	}
+
+	/** Mutes, unmutes or toggles the participant's listening of one group, keeping its level, v2 only. */
+	async setGroupMuteMode(groupId: string, mode: 'toggle' | 'on' | 'off'): Promise<void> {
+		const api = this.requireIntegrationApi('Mute')
+
+		if (api === null) {
+			return
+		}
+
+		await this.enqueueListenWrite(async () => {
+			// Nothing announces the Entity's own listening, so a toggle decides from a fresh read, as
+			// Output's toggle does from currentControls().
+			if (mode === 'toggle' && Date.now() - this.groupsRefreshedAt > this.pollIntervalMs()) {
+				await this.refreshIntercom(this.generation, 'groups')
+			}
+
+			const group = this.requireMemberGroup(groupId, 'Mute')
+
+			if (group === null) {
+				return
+			}
+
+			const muted = mode === 'toggle' ? !group.muted : mode === 'on'
+			const generation = this.generation
+			await api.setListening(groupId, muted, this.requestOptions())
+
+			if (generation === this.generation) {
+				this.lastLocalWriteAt = Date.now()
+				this.notePresent()
+				this.updateState({ intercom: api.intercomState(), lastError: '' })
+			}
+		})
+	}
+
+	/**
+	 * Answers the first caller of `ringing` (*Answer*), v2 only. With nobody ringing, or while a call
+	 * is already up, it logs why and sends nothing: *Answer* is unavailable during a call.
+	 */
+	async answerCall(): Promise<void> {
+		const api = this.requireIntegrationApi('Answer')
+		const caller = this.state.intercom?.ringing[0]
+
+		if (api === null) {
+			return
+		}
+
+		if ((this.state.intercom?.call ?? null) !== null) {
+			this.log('warn', 'Answer: you are already in a call; hang it up first.')
+			return
+		}
+
+		if (caller === undefined) {
+			this.log('info', 'Answer: nobody is calling.')
+			return
+		}
+
+		await this.enqueueTalkWrite(async () => {
+			await this.writeIntegrationControls(api, { call: { callerId: caller.id } })
+		})
+	}
+
+	/** Hangs up the current direct call (*Hang up*), v2 only; with none it changes nothing. */
+	async hangUpCall(): Promise<void> {
+		const api = this.requireIntegrationApi('Hang up')
+
+		if (api === null) {
+			return
+		}
+
+		await this.enqueueTalkWrite(async () => {
+			await this.writeIntegrationControls(api, { call: null })
+		})
+	}
+
+	/** The v2 client, or null after logging that `actionName` needs `/api/v2`. */
+	private requireIntegrationApi(actionName: string): CrewLanV2Client | null {
+		const api = this.requireApi()
+
+		if (api instanceof CrewLanV2Client) {
+			return api
+		}
+
+		this.log('warn', needsIntegrationApiMessage(actionName))
+		return null
+	}
+
+	/**
+	 * A group the participant is a member of, or null after logging why not: a group left or removed
+	 * keeps its buttons, and a press on one must say what went wrong.
+	 */
+	private requireMemberGroup(groupId: string, actionName: string): IntercomGroupState | null {
+		const group = this.state.intercom?.groups.find((candidate) => candidate.id === groupId) ?? null
+
+		if (group === null) {
+			this.log(
+				'error',
+				`${actionName}: you are not a member of the intercom group "${groupId}", or it no longer exists.`,
+			)
+		}
+
+		return group
+	}
+
+	private async writeGroupTalk(
+		api: CrewLanV2Client,
+		groupId: string,
+		held: boolean,
+		talkKey: 'push' | 'latch',
+	): Promise<void> {
+		if (!held) {
+			// Letting go is never refused, a group the module no longer knows included.
+			const name = this.state.intercom?.groups.find((group) => group.id === groupId)?.name ?? groupId
+			await this.releaseTalk(`Talk on ${name}`, async (options) => {
+				await this.writeIntegrationControls(api, { groupTalk: { groupId, held: false } }, options)
+			})
+			return
+		}
+
+		if (this.requireMemberGroup(groupId, 'Talk') === null) {
+			return
+		}
+
+		await this.writeIntegrationControls(api, { groupTalk: { groupId, held: true, talkKey } })
+	}
+
+	/** One `intercom.command.setControls`, its answer applied as a controls patch's is. */
+	private async writeIntegrationControls(
+		api: CrewLanV2Client,
+		body: IntegrationControlsBody,
+		options: RequestOptions = {},
+	): Promise<void> {
+		const entityId = this.requireEntityId()
+		const generation = this.generation
+		const controls = await api.setControls(entityId, body, this.requestOptions(options))
+
+		if (generation !== this.generation) {
+			return
+		}
+
+		this.lastLocalWriteAt = Date.now()
+
+		// A release is answered while the Entity is absent too, so only another write shows presence.
+		if (body.globalTalk !== false && body.groupTalk?.held !== false) {
+			this.notePresent()
+		}
+
+		this.applyControlsUpdate(controls, this.lastLocalWriteAt, { lastError: '' })
 	}
 
 	async dismissAlerts(): Promise<void> {
@@ -636,14 +911,24 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		this.setInstanceStatus(InstanceStatus.Connecting)
 
 		try {
-			this.api = new CrewLanApiClient({
-				baseUrl: this.config.baseUrl,
-				token: this.entityToken,
-				logger: {
-					debug: (message) => this.log('debug', message),
-					warn: (message) => this.log('warn', message),
-				},
-			})
+			const logger = {
+				debug: (message: string): void => this.log('debug', message),
+				warn: (message: string): void => this.log('warn', message),
+			}
+			const http = new CrewLanApiClient({ baseUrl: this.config.baseUrl, token: this.entityToken, logger })
+			// One API per connection, asked at every connect: a Workspace may gain or lose /api/v2
+			// between two runs, and a 404 here leaves the Public API v1 path exactly as it was.
+			const description = await probeIntegrationApi(http, { signal: abort.signal })
+
+			if (generation !== this.generation) {
+				return
+			}
+
+			this.api = description === null ? http : new CrewLanV2Client(http, description, logger)
+			// A connection that has not read its snapshot yet counts its Entity as present.
+			this.ownerAbsence = null
+			this.callerNamesAsked.clear()
+			this.updateState({ api: description === null ? 'v1' : 'v2', ownerPresent: true })
 			await this.loadSnapshot(generation, abort.signal)
 		} catch (error) {
 			if (generation !== this.generation || isAbortError(error)) {
@@ -671,6 +956,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		this.setInstanceStatus(InstanceStatus.Ok)
 		this.startEventStream(generation)
 		this.schedulePoll(generation)
+		this.scheduleControlsRead(generation)
 	}
 
 	private cleanupConnection(): void {
@@ -683,6 +969,8 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		this.streamOpenedAt = 0
 		this.clearReconnectTimer()
 		this.clearPollTimer()
+		this.clearControlsTimer()
+		this.pollAgain = false
 		this.clearStreamRestartTimer()
 		this.stopEventStream()
 
@@ -705,6 +993,12 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	private async loadSnapshot(generation: number, signal: AbortSignal | undefined): Promise<void> {
 		const api = this.requireApi()
 		const options: RequestOptions = signal === undefined ? {} : { signal }
+
+		if (api instanceof CrewLanV2Client) {
+			await this.loadIntegrationSnapshot(api, generation, options)
+			return
+		}
+
 		const requestedAt = Date.now()
 		const session = await api.getSession(options)
 		const grantedEntities = session.entities.filter((entity) => entity.granted)
@@ -750,6 +1044,55 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			macrosSupported: macros !== null,
 			status: nextStatus,
 			controls: nextControls,
+			ownerPresent: this.presenceFrom(nextStatus),
+			lastError: '',
+		})
+		this.setInstanceStatus(InstanceStatus.Ok)
+	}
+
+	/** The `/api/v2` snapshot: one read of the snapshot, the controls and the groups, in v1's shapes. */
+	private async loadIntegrationSnapshot(
+		api: CrewLanV2Client,
+		generation: number,
+		options: RequestOptions,
+	): Promise<void> {
+		const requestedAt = Date.now()
+		const snapshot = await api.loadSnapshot(options)
+
+		if (generation !== this.generation) {
+			return
+		}
+
+		const nextStatus =
+			snapshot.status === null
+				? this.state.status
+				: pickFresher(this.state.status, snapshot.status, requestedAt, this.lastLocalWriteAt)
+		const nextControls = pickFresher(this.state.controls, snapshot.controls, requestedAt, this.lastLocalWriteAt)
+
+		if (nextControls === snapshot.controls) {
+			this.controlsRefreshedAt = Date.now()
+		}
+
+		this.groupsRefreshedAt = Date.now()
+		this.updateState({
+			connected: true,
+			entityId: snapshot.entityId,
+			workspace: snapshot.workspace,
+			entity: snapshot.entity,
+			statuses: snapshot.statuses,
+			// A run event after this snapshot was asked for knows better whether the macro runs.
+			macros: this.mergeMacros(snapshot.macros, requestedAt).map((macro) => {
+				const held = this.state.macros.find((candidate) => candidate.id === macro.id)
+
+				return held !== undefined && (this.macroRunEventAt.get(macro.id) ?? 0) >= requestedAt
+					? { ...macro, running: held.running }
+					: macro
+			}),
+			macrosSupported: true,
+			status: nextStatus,
+			controls: nextControls,
+			intercom: snapshot.intercom,
+			ownerPresent: this.presenceFrom(nextStatus),
 			lastError: '',
 		})
 		this.setInstanceStatus(InstanceStatus.Ok)
@@ -781,7 +1124,27 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 				onOpen: () => this.handleStreamOpen(generation),
 				onEvent: (event) => {
 					if (generation === this.generation) {
+						// The bound Entity's own Offline, held back until it is present again, is the one
+						// frame that does not say it is; v2's entityStatusChanged arrives as status.changed.
+						if (!this.isOwnOffline(event)) {
+							this.notePresentByStream()
+						}
+
 						this.applyEvent(event)
+					}
+				},
+				onIntegrationEvent: (event) => {
+					if (generation === this.generation) {
+						this.applyIntegrationEvent(event, generation)
+					}
+				},
+				// What the stream missed cannot be replayed: the snapshot, controls and groups are read
+				// again at once.
+				onGap: () => {
+					if (generation === this.generation) {
+						this.notePresentByStream()
+						this.log('debug', 'CrewLAN event stream missed events; reading the Workspace again.')
+						this.schedulePoll(generation, 0)
 					}
 				},
 			})
@@ -893,8 +1256,14 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	}
 
 	private async runPoll(generation: number): Promise<void> {
-		if (this.pollInFlight || generation !== this.generation) {
-			// An in-flight snapshot re-arms the timer itself when it settles.
+		if (generation !== this.generation) {
+			return
+		}
+
+		if (this.pollInFlight) {
+			// The snapshot in flight may have been read before what asked for this one; one more runs
+			// once it settles.
+			this.pollAgain = true
 			return
 		}
 
@@ -914,7 +1283,40 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			this.pollInFlight = false
 		}
 
-		this.schedulePoll(generation)
+		const again = this.pollAgain
+		this.pollAgain = false
+		this.schedulePoll(generation, again ? 0 : undefined)
+	}
+
+	/**
+	 * Over v2, reads `intercom.query.getControls` every second while connected: the audio
+	 * connection and the microphone's sending change without an event a connection receives
+	 * (`audio.event.*` is recorded, never streamed), and v1's stream reads them 4×/s for the same
+	 * reason. One read a second stays far below the integration API's 20 requests/s.
+	 */
+	private scheduleControlsRead(generation: number): void {
+		this.clearControlsTimer()
+
+		if (generation !== this.generation || this.destroyed || !(this.api instanceof CrewLanV2Client)) {
+			return
+		}
+
+		this.controlsTimer = setTimeout(() => {
+			this.controlsTimer = null
+			void this.refreshIntercom(generation, 'controls').then(() => {
+				// A read in flight while the connection broke must not re-arm the timer.
+				if (this.state.connected) {
+					this.scheduleControlsRead(generation)
+				}
+			})
+		}, integrationControlsReadIntervalMs)
+	}
+
+	private clearControlsTimer(): void {
+		if (this.controlsTimer !== null) {
+			clearTimeout(this.controlsTimer)
+			this.controlsTimer = null
+		}
 	}
 
 	// ---------------------------------------------------------------------------
@@ -924,6 +1326,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	private scheduleReconnect(error: unknown): void {
 		// Nothing useful can happen on the dead connection until it is rebuilt.
 		this.clearPollTimer()
+		this.clearControlsTimer()
 		this.clearStreamRestartTimer()
 		this.stopEventStream()
 
@@ -990,6 +1393,104 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		}
 	}
 
+	/**
+	 * The `/api/v2` events v1 has no shape for. A run's start and end carry the macro's id alone; the
+	 * controls and the groups are read again, because their events do not carry all the module shows
+	 * (the audio connection, the Entity's own listening of a group).
+	 */
+	private applyIntegrationEvent(event: IntegrationEventEnvelope, generation: number): void {
+		const { payload } = event
+
+		// Its own Offline, held back until the Entity is present again, is the one frame that does
+		// not say it is.
+		if (!(
+			event.wireId === 'status.event.entityStatusChanged' &&
+			payload.entityId === this.state.entityId &&
+			payload.statusId === 'offline'
+		)) {
+			this.notePresentByStream()
+		}
+
+		switch (event.wireId) {
+			case 'macros.event.macroRunStarted':
+			case 'macros.event.macroRunEnded':
+				if (typeof payload.macroId === 'string') {
+					this.setMacroRunning(payload.macroId, event.wireId === 'macros.event.macroRunStarted')
+				}
+				return
+			case 'intercom.event.controlsChanged':
+				if (payload.entityId === this.state.entityId) {
+					void this.refreshIntercom(generation, 'controls')
+				}
+				return
+			case 'intercom.event.groupCreated':
+			case 'intercom.event.groupChanged':
+			case 'intercom.event.groupRemoved':
+			case 'intercom.event.memberAdded':
+			case 'intercom.event.memberRemoved':
+				void this.refreshIntercom(generation, 'groups')
+				return
+			case 'status.event.statusDefined':
+			case 'status.event.statusUpdated':
+			case 'status.event.statusRemoved':
+			case 'status.event.entityStatusChanged':
+				// A status the catalogue does not hold yet, or the catalogue itself changed: the snapshot
+				// carries both.
+				this.schedulePoll(generation, 0)
+				return
+			default:
+				this.log('debug', `Ignoring CrewLAN event "${event.wireId}".`)
+		}
+	}
+
+	private setMacroRunning(macroId: string, running: boolean): void {
+		this.macroRunEventAt.set(macroId, Date.now())
+		const index = this.state.macros.findIndex((macro) => macro.id === macroId)
+		const current = index < 0 ? undefined : this.state.macros[index]
+
+		if (current === undefined || current.running === running) {
+			return
+		}
+
+		this.updateState({ macros: this.state.macros.with(index, { ...current, running }) })
+	}
+
+	/** Reads the controls or the groups again after their event; a failure waits for the next poll. */
+	private async refreshIntercom(generation: number, part: 'controls' | 'groups'): Promise<void> {
+		const api = this.api
+
+		if (!(api instanceof CrewLanV2Client) || this.state.entityId === null || !this.state.connected) {
+			return
+		}
+
+		const entityId = this.state.entityId
+		const requestedAt = Date.now()
+
+		try {
+			if (part === 'controls') {
+				const controls = await api.getEntityControls(entityId, this.requestOptions())
+
+				// While the connection is down its controls stay cleared.
+				if (generation === this.generation && this.state.connected) {
+					this.applyControlsUpdate(controls, requestedAt)
+				}
+
+				return
+			}
+
+			await api.readGroups(this.requestOptions())
+
+			if (generation === this.generation && this.state.connected) {
+				this.groupsRefreshedAt = Date.now()
+				this.updateState({ intercom: api.intercomState() })
+			}
+		} catch (error) {
+			if (!isAbortError(error)) {
+				this.log('debug', `Could not read the intercom ${part} again: ${describeError(error)}`)
+			}
+		}
+	}
+
 	/** Only reached once a snapshot has confirmed that this CrewLAN serves macros. */
 	private applyMacroEvent(event: PublicEventEnvelope): void {
 		if (event.type === 'macro.changed') {
@@ -1007,6 +1508,97 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		} else {
 			this.log('debug', 'Ignoring macro.removed event with an unexpected payload.')
 		}
+	}
+
+	/**
+	 * Names come from the snapshot's participants, so a caller who joined after it shows by id: the
+	 * snapshot is read again once per such id, and the intercom rebuilt with the name.
+	 */
+	private nameNewCallers(api: CrewLanV2Client): void {
+		const unasked = api.unnamedCallers().filter((id) => !this.callerNamesAsked.has(id))
+
+		if (unasked.length === 0) {
+			return
+		}
+
+		for (const id of unasked) {
+			this.callerNamesAsked.add(id)
+		}
+
+		const generation = this.generation
+
+		void api.readParticipants(this.requestOptions()).then(
+			() => {
+				if (generation === this.generation && this.state.connected) {
+					this.updateState({ intercom: api.intercomState() })
+				}
+			},
+			(error: unknown) => {
+				if (!isAbortError(error)) {
+					this.log('debug', `Could not read the participants' names again: ${describeError(error)}`)
+				}
+			},
+		)
+	}
+
+	private isOwnOffline(event: PublicEventEnvelope): boolean {
+		return (
+			event.type === 'status.changed' &&
+			isPublicEntityStatusDto(event.data) &&
+			event.data.entityId === this.state.entityId &&
+			event.data.status.id === offlineStatusId
+		)
+	}
+
+	/**
+	 * The v2 stream is silent while the Entity is present at no Client, so every frame on it — an
+	 * event of any kind, a `gap` — says it is. A v1 stream speaks regardless and says nothing.
+	 */
+	private notePresentByStream(): void {
+		if (this.api instanceof CrewLanV2Client) {
+			this.notePresent()
+		}
+	}
+
+	/** A sign the Entity is present at a Client again: the buttons stop being held grey. */
+	private notePresent(): void {
+		this.ownerAbsence = null
+
+		if (!this.state.ownerPresent && isEntityPresent(this.state.status)) {
+			this.updateState({ ownerPresent: true })
+		}
+	}
+
+	/**
+	 * Whether `status` shows the Entity present, held false after a refusal until the status
+	 * changed later than it: Status shows Offline only after its presence grace, so a status read
+	 * between the refusal and that moment still shows the chosen one.
+	 */
+	private presenceFrom(status: PublicEntityStatusDto | null): boolean {
+		if (!isEntityPresent(status)) {
+			return false
+		}
+
+		if (this.ownerAbsence === null) {
+			return true
+		}
+
+		const changedAt = Date.parse(status?.updatedAt ?? '')
+
+		if (Number.isFinite(changedAt) && changedAt > this.ownerAbsence.statusAt) {
+			this.ownerAbsence = null
+			return true
+		}
+
+		return false
+	}
+
+	/** Holds the buttons grey after an owner-absent refusal; see `ownerAbsence`. */
+	private noteAbsent(message: string): void {
+		const statusAt = Date.parse(this.state.status?.updatedAt ?? '')
+
+		this.ownerAbsence = { statusAt: Number.isFinite(statusAt) ? statusAt : Number.NEGATIVE_INFINITY }
+		this.updateState({ lastError: message, ownerPresent: false })
 	}
 
 	private applyStatusUpdate(
@@ -1028,7 +1620,11 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			return
 		}
 
-		this.updateState({ ...extra, status: next })
+		this.updateState({
+			...extra,
+			status: next,
+			ownerPresent: this.presenceFrom(next),
+		})
 	}
 
 	private applyControlsUpdate(
@@ -1050,12 +1646,29 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			this.controlsRefreshedAt = Date.now()
 		}
 
-		if (next === this.state.controls && Object.keys(extra).length === 0) {
+		// The intercom follows the controls it was composed from, so an older answer moves neither.
+		const intercom =
+			this.api instanceof CrewLanV2Client && next === controls ? { intercom: this.api.intercomState() } : {}
+
+		// An audio connection is a Client of the Entity attached: a sign of presence.
+		if (intercom.intercom?.audioConnected === true) {
+			this.notePresent()
+		}
+
+		if (this.api instanceof CrewLanV2Client && next === controls) {
+			this.nameNewCallers(this.api)
+		}
+
+		if (
+			next === this.state.controls &&
+			Object.keys(extra).length === 0 &&
+			sameJson(intercom.intercom ?? this.state.intercom, this.state.intercom)
+		) {
 			// Nothing to publish: a poll that confirmed the state must not cost a variable update.
 			return
 		}
 
-		this.updateState({ ...extra, controls: next })
+		this.updateState({ ...extra, ...intercom, controls: next })
 	}
 
 	/** Keep a macro the operator just started from being rolled back by an older in-flight poll. */
@@ -1166,6 +1779,12 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		}
 
 		this.lastLocalWriteAt = Date.now()
+
+		// A release is answered while the Entity is absent too, so only another write shows presence.
+		if (patch.shoutbox.talk?.active !== false) {
+			this.notePresent()
+		}
+
 		// One publish for the new controls and the cleared error: setVariableValues is batched.
 		this.applyControlsUpdate(controls, this.lastLocalWriteAt, { lastError: '' })
 	}
@@ -1187,8 +1806,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	 * the microphone open while the button already looks idle. It is retried with a short deadline
 	 * and a final failure is logged as an error instead of the generic warning.
 	 */
-	private async releaseTalk(controlMode: 'push' | 'latch'): Promise<void> {
-		const patch: ControlsPatch = { shoutbox: { talk: { active: false, controlMode: null } } }
+	private async releaseTalk(label: string, release: (options: RequestOptions) => Promise<void>): Promise<void> {
 		const generation = this.generation
 		const signal = this.connectionAbort?.signal
 		let lastError: unknown = null
@@ -1205,7 +1823,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			}
 
 			try {
-				await this.patchControls(patch, { timeoutMs: talkReleaseTimeoutMs })
+				await release({ timeoutMs: talkReleaseTimeoutMs })
 				return
 			} catch (error) {
 				lastError = error
@@ -1216,7 +1834,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 
 				this.log(
 					'warn',
-					`Talk release (${controlMode}) attempt ${String(attempt + 1)}/${String(talkReleaseAttempts)} failed: ${describeError(error)}`,
+					`Releasing ${label}: attempt ${String(attempt + 1)}/${String(talkReleaseAttempts)} failed: ${describeError(error)}`,
 				)
 			}
 		}
@@ -1225,7 +1843,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			return
 		}
 
-		const message = `Failed to release talk (${controlMode}) — the microphone may still be live in CrewLAN: ${describeError(lastError)}`
+		const message = `Failed to release ${label} — the microphone may still be live in CrewLAN: ${describeError(lastError)}`
 		this.log('error', message)
 
 		if (isConnectionLevelError(lastError)) {
@@ -1237,7 +1855,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		this.updateState({ lastError: message })
 	}
 
-	private requireApi(): CrewLanApiClient {
+	private requireApi(): CrewLanApiClient | CrewLanV2Client {
 		if (this.api === null) {
 			throw new CrewLanApiError('CrewLAN is not connected.')
 		}
@@ -1268,6 +1886,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			streamConnected: false,
 			status: null,
 			controls: null,
+			intercom: null,
 			// The list survives so the buttons do not vanish, but nothing may keep claiming to run.
 			macros: this.state.macros.map((macro) => (macro.running ? { ...macro, running: false } : macro)),
 			lastError: lastError ?? display,
@@ -1280,8 +1899,38 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	private handleOperationError(actionName: string, error: unknown): void {
 		let message = `${actionName}: ${describeError(error)}`
 
-		if (error instanceof CrewLanApiError && error.statusCode === 401 && this.state.connected) {
-			message += ' (CrewLAN rejects actions while the entity is not present.)'
+		// Over /api/v2 the owner's absence is named, and no revoked token: the connection stays up and
+		// greys its buttons until a status or a snapshot shows the Entity present again.
+		if (isOwnerAbsentError(error)) {
+			this.log('warn', message)
+			this.noteAbsent(message)
+			return
+		}
+
+		// v1 answers a write while the Entity is absent with a bare 401, and its reads go on, so the
+		// connection stays up and greys its buttons as over v2; a refused token fails the next poll.
+		// Over v2 a 401 of another code is a refused token, which the next poll reports.
+		if (
+			error instanceof CrewLanApiError &&
+			error.statusCode === 401 &&
+			this.state.connected &&
+			this.state.api !== 'v2'
+		) {
+			message += ` (${ownerAbsentMessage})`
+			this.log('warn', message)
+			this.noteAbsent(message)
+			return
+		}
+
+		// A refused group or call write says why on the log alone: Companion shows nothing on a button
+		// for a failed action.
+		if (
+			error instanceof CrewLanApiError &&
+			(error.code === 'intercom_in_call' || error.code === 'intercom_not_member')
+		) {
+			this.log('error', message)
+			this.updateState({ lastError: message })
+			return
 		}
 
 		this.log('warn', message)
@@ -1316,6 +1965,9 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	 */
 	private definitionsKey(): string {
 		return JSON.stringify({
+			// Over v1 the Intercom presets hold the one Talk and Output; over v2 one set per group.
+			api: this.state.api,
+			groups: (this.state.intercom?.groups ?? []).map((group) => [group.id, group.name]),
 			statuses: this.getSelectableStatuses().map((status) => [
 				status.id,
 				getCompanionStatusLabel(status),
@@ -1345,8 +1997,16 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 
 		const changed = new Set<StateGroup>()
 
-		if (previous.connected !== next.connected) {
+		if (
+			previous.connected !== next.connected ||
+			previous.ownerPresent !== next.ownerPresent ||
+			previous.api !== next.api
+		) {
 			changed.add('connection')
+		}
+
+		if (!sameJson(previous.intercom, next.intercom)) {
+			changed.add('intercom')
 		}
 
 		if (!sameJson(previous.status, next.status) || !sameJson(previous.statuses, next.statuses)) {

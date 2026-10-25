@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
+	buttonFontSize,
 	getCompanionMacroButtonStyle,
 	getCompanionStatusButtonStyle,
 	getCompanionStatusLabel,
+	getOfflineButtonStyle,
+	offlineBackgroundColor,
+	offlineTextColor,
 } from '../src/button-style.js'
 import type { PublicMacroDto, PublicStatusDto } from '../src/types.js'
 
@@ -101,5 +105,28 @@ describe('Companion macro button styles', () => {
 
 		assert.equal(broken.bgcolor, 0x8e24aa)
 		assert.equal(broken.color, 0xffffff)
+	})
+})
+
+describe('Companion offline button style', () => {
+	it('is one colour pair, dark grey ground and light grey text, around the button text', () => {
+		assert.deepEqual(getOfflineButtonStyle('Output\nMute'), {
+			text: 'Output\nMute',
+			size: buttonFontSize,
+			color: offlineTextColor,
+			bgcolor: offlineBackgroundColor,
+			show_topbar: false,
+		})
+	})
+
+	it('keeps the ground dark and grey and the text light and grey', () => {
+		const channels = (color: number): number[] => [(color >> 16) & 0xff, (color >> 8) & 0xff, color & 0xff]
+		const ground = channels(offlineBackgroundColor)
+		const text = channels(offlineTextColor)
+
+		assert.equal(new Set(ground).size, 1)
+		assert.equal(new Set(text).size, 1)
+		assert.ok((ground[0] ?? 255) < 0x40)
+		assert.ok((text[0] ?? 0) >= 0x90)
 	})
 })

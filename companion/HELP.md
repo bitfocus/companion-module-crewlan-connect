@@ -1,11 +1,22 @@
 # CrewLAN Connect
 
 This module connects Companion to one CrewLAN entity through a CrewLAN Connect token. It can set
-that entity's status, dismiss its alerts, run the workspace macros, and drive the Shoutbox listen
-and talk channels.
+that entity's status, dismiss its alerts, run the workspace macros, and drive its Intercom: Global
+Talk, the Output and Input mutes, a Talk and a Mute for every group the entity is in, and answering
+and hanging up a direct call.
 
-Audio stays in CrewLAN. Companion only controls the state of the CrewLAN Shoutbox session for the
-entity the token belongs to.
+Audio stays in CrewLAN. Companion only controls the Intercom of the entity the token belongs to; it
+sends and receives no audio of its own.
+
+## Which CrewLAN it works with
+
+The module speaks the CrewLAN integration API, `/api/v2`, wherever the workspace serves it, and the
+Public API v1 otherwise. It asks `/api/v2` first on every connect, so nothing has to be chosen; the
+`api_version` variable says which one the connection speaks, `v2` or `v1`.
+
+Over the Public API v1 — a CrewLAN v1 workspace — the connection keeps statuses, macros, alerts and
+the one Global Talk and Output. Input, the groups and direct calls need a workspace that serves
+`/api/v2`; over v1 their actions change nothing and say so in the connection's log.
 
 ## Setup
 
@@ -18,7 +29,8 @@ entity the token belongs to.
 4. **Poll fallback interval (ms)** — leave at 5000 unless you have a reason to change it. See
    below.
 
-The token must grant exactly one entity capability. This module never selects or impersonates
+The token must grant exactly one entity capability, as a CrewLAN connection's token always does.
+This module never selects or impersonates
 another CrewLAN entity, so a token that grants none or several is rejected.
 
 ## How updates arrive
@@ -31,6 +43,34 @@ interval if you set it longer than that.
 
 ## Using it
 
+**Offline at a glance.** Every ready-made button is dark grey with light grey text while the
+connection is not up — the connection is disabled in Companion, the workspace cannot be reached,
+the token is refused or paused — and while the entity is not present at a CrewLAN Client. CrewLAN
+accepts a connection's presses only while its entity is present at a Client, and the connection
+stays up meanwhile. A press CrewLAN refuses for that reason greys the buttons at once. Without
+one, they turn grey within about 45 seconds after the entity's last Client closed: CrewLAN's
+15-second grace, plus up to 30 seconds until the module's next read, or the poll interval where you
+set it longer. They return to their own look over `/api/v2` at any event from CrewLAN, the
+stream's resync after the entity returns included, an accepted press, an audio connection of the
+entity (seen within about a second) or a later status change; over the Public API v1 at an
+accepted press or a later status change. Companion's preset list shows each button in its own
+look. A Talk or Answer button is greyed the same way while it cannot work: while no CrewLAN Client
+of the entity has its audio open, or during a direct call. A group's
+buttons grey once the entity is no longer in the group.
+
+The grey look lives in the presets: a preset's base style is the grey, and its feedbacks paint the
+ordinary look while the button can work. Only **Connection Ready**, **Group Talk Available**,
+**Group Member** and **Direct: Answer Available** depend on that; every other feedback shows
+CrewLAN's state at all times. To give a button of your own the grey look, give it dark grey with
+light grey text, add **Connection Ready** as its first feedback, painting its ordinary look, and
+add it once more as its last feedback, inverted, in the grey, so that no state feedback between
+them paints over the grey.
+
+**Buttons placed from presets of a module before 2.0.0 keep their old look** and behave as they
+did: they do not turn grey. Drag the preset onto the button again to give it the new look:
+Companion's upgrade scripts cannot add a feedback to a button that is already placed, nor change its
+base style.
+
 **Statuses.** Every selectable CrewLAN status becomes a ready-made button in the _Status_ preset
 section, painted in that status's own colours and lit while it is the current one. The five
 built-in CrewLAN statuses are labelled Ready, Attention, Critical, Standby and Offline regardless
@@ -42,15 +82,36 @@ while it runs, and pressing it starts the macro. Macros are one-shot: there is n
 and no toggle, and Companion shows no progress or step count. Names, colours, the running state and
 the set of macros all update live. A CrewLAN without macro support simply offers no macro buttons.
 
-**Shoutbox.** The _Shoutbox_ section ships a Listen Mute toggle, a Talk Push button that opens the
-channel on press and closes it on release, and a Talk Latch button. Closing the talk channel is the
-one write this module never lets fail quietly: it is retried, and if every attempt fails it logs an
-error saying the microphone may still be live in CrewLAN.
+**Intercom.** The _Intercom_ section starts with _Global Talk (push)_, which talks while it is held,
+and _Global Talk (latch)_, which talks until it is pressed again. Then the two mutes: _Output
+Mute_, the master mute, which silences every group and every call, and _Input Mute_, the
+microphone. Then, for every group the entity is in, a section of its own, _All_ first — the group
+everybody is in: _‹group›: Talk (push)_, _‹group›: Talk (latch)_ and _‹group›: Mute_, such as _All:
+Talk (push)_. Mute silences that group alone and keeps its level. When the entity joins a group,
+its buttons appear in Companion's preset list by themselves, ready to be placed. A renamed group
+renames its presets, and a group left or removed takes them away: a button placed from them turns
+grey, and a press on it reports an error. Last comes _Direct_: _Direct: Answer_ is lit while
+somebody rings, names the caller (`$(crewlan:intercom_ringing_caller)`) and answers the call; it
+stays grey during a call, even while somebody else rings, and a press then sends nothing and logs
+`Answer: you are already in a call; hang it up first.` _Direct: Hang up_ is lit during a call,
+names the other side (`$(crewlan:intercom_call_partner)`) and ends it; with no call it does
+nothing. A caller who joined the Workspace after the connection came up shows by their id until the
+module has read their name, a moment later. Over `/api/v2` the module reads the Intercom controls
+once a second while connected, so Global Talk's and the groups' Talk availability, _Direct: Answer_
+and **Microphone Live** follow the entity's audio connection within about a second. Over the Public
+API v1 the section holds Global Talk and Output Mute alone.
 
-**Alerts.** The _Alerts_ section ships a Dismiss Alerts button. The CrewLAN event for an alert
-carries only its scope and the entities it targets, never the alert text, so the `last_alert`
-variable records when and how the alert arrived rather than what it said. It clears when you press
-Dismiss Alerts, and automatically five minutes after the alert.
+A direct call takes the Talk keys. Talk is unavailable while the entity is in a direct call;
+answering a call lets a held Global Talk go; a Talk press during the call is refused; and after the
+hang-up nothing talks by itself — press Talk again to talk.
+
+Letting a Talk go is the one write this module never lets fail quietly, and CrewLAN always accepts
+it: it is retried, and if every attempt fails it logs an error saying the microphone may still be
+live in CrewLAN.
+
+**Alerts.** The _Alerts_ section ships a Dismiss Alerts button. The `last_alert` variable records
+when an alert arrived and whether it was for the whole workspace or for this entity, not what it
+said. It clears when you press Dismiss Alerts, and automatically five minutes after the alert.
 
 You are not limited to the ready-made buttons. All actions, feedbacks and variables this connection
 provides are listed in Companion's own action, feedback and variable pickers. The boolean variables
@@ -63,26 +124,44 @@ comparing it against the text `true`.
 exactly one entity. The connection list deliberately shows only a generic message so a token can
 never appear on a wall-mounted surface; the specific reason is in the connection's log.
 
+On a CrewLAN workspace whose administrator switched the API v1 compatibility mode off
+(_Administration_ › _Connections_), a connection that speaks the Public API v1 shows "Authentication
+failure" with CrewLAN's sentence naming the switch, and the module tries again every 60
+seconds. This module speaks `/api/v2` on such a workspace and is not affected; a module
+before 2.0.0 is.
+
+**Every button is grey, but the token is right.** The entity is not present at a CrewLAN Client:
+its status is Offline, or CrewLAN refused a press with `CrewLAN rejects actions while the entity is
+not present.` The connection stays up. Once the entity is present at a Client again, the buttons
+come back at the next sign of it that _Offline at a glance_ lists; over the Public API v1 that is a
+later status change or a press CrewLAN accepts, so a press is worth a try. A press meanwhile is
+refused because the entity is not present, never as a revoked token, and letting go of a held Talk
+is still accepted.
+
 **The connection says "Bad configuration".** Either the connection is not filled in yet — the
 status line then names the setting, for example `Connection token is required.` — or CrewLAN
 answered 400 or 404, in which case the Address is wrong: it must be the CrewLAN host, not a page
-inside it. A connection that is only missing its settings is not retried in the background; it
-comes up as soon as you save them.
+inside it. A workspace whose edition offers no Connect answers 404 to both APIs and shows the same.
+The module reads such an Address again every 60 seconds. A connection that is only missing its
+settings is not retried in the background; it comes up as soon as you save them.
 
 **The connection says "Connection failure".** CrewLAN could not be reached, answered too slowly, or
-sent something that is not the Public API. The module keeps retrying by itself, backing off to one
+sent something that is not a CrewLAN API. The module keeps retrying by itself, backing off to one
 attempt every 30 seconds.
 
 **A button reports an error but the connection stays up.** CrewLAN rejected that one write. The most
 common cause is that the entity is not currently present in the workspace, which CrewLAN refuses;
-the log line says so, and the message is also in the `last_error` variable. Action failures never
-take the connection down.
+the log line says so, the message is also in the `last_error` variable, and the buttons turn grey.
+A Talk pressed while the entity is in a direct call is refused as well (`409 intercom_in_call`):
+hang up, then press it again. A group's button reports an error when the entity is no longer in
+that group. Action failures never take the connection down.
 
-**Shoutbox buttons all went dark.** Status and Shoutbox state are cleared while the connection is
-down, so that no button keeps claiming a live microphone against a host that is gone. That means a
-dark talk button means either "not talking" or "offline". Pair it with the **Connection OK**
-feedback if a button has to show the difference. Macro buttons stay in place but stop claiming to
-run.
+**Buttons went dark rather than grey.** They were placed from presets of a module before 2.0.0 and
+behave as they did — drag the preset again (see _Using it_). Status and Intercom state are cleared
+while the connection is down, so that no button keeps claiming a live microphone against a host
+that is gone; on such a button a dark talk button means either "not talking" or "offline". Pair it
+with the **Connection OK** feedback if a button of your own has to show the difference. Macro
+buttons stay in place but stop claiming to run.
 
 **Nothing updates, but the connection is fine.** Check the `event_stream_connected` variable. If it
 is false, the live stream is down and the module is polling at the fallback interval; state is

@@ -1,3 +1,4 @@
+import type { CompanionInputFieldDropdown } from '@companion-module/base'
 import { macroIdRegex, statusIdRegex } from './config.js'
 import type ModuleInstance from './main.js'
 
@@ -37,6 +38,63 @@ export type ActionsSchema = {
 			macroId: string
 		}
 	}
+	input_mute: {
+		options: {
+			mode: MuteMode
+		}
+	}
+	group_talk_push_down: {
+		options: {
+			groupId: string
+		}
+	}
+	group_talk_push_up: {
+		options: {
+			groupId: string
+		}
+	}
+	group_talk_latch: {
+		options: {
+			groupId: string
+			mode: LatchMode
+		}
+	}
+	group_mute: {
+		options: {
+			groupId: string
+			mode: MuteMode
+		}
+	}
+	call_answer: {
+		options: Record<string, never>
+	}
+	call_hang_up: {
+		options: Record<string, never>
+	}
+}
+
+/** Regex string (Companion format) for a typed intercom group id: `everyone`, or `grp-` and 32 hex digits. */
+export const groupIdRegex = '/^(everyone|grp-[0-9a-f]{32})$/'
+
+/**
+ * The group picker shared by the group actions and feedbacks: the groups the participant is a
+ * member of, the Everyone group ("All") first. A typed id is accepted, so a button survives a list
+ * not yet loaded.
+ */
+export function groupOption(self: ModuleInstance): CompanionInputFieldDropdown<'groupId', string> {
+	const choices = (self.getCrewLanState().intercom?.groups ?? []).map((group) => ({ id: group.id, label: group.name }))
+
+	return {
+		id: 'groupId',
+		type: 'dropdown',
+		label: 'Group',
+		default: choices[0]?.id ?? 'everyone',
+		choices: choices.length > 0 ? choices : [{ id: 'everyone', label: 'All' }],
+		allowCustom: true,
+		regex: groupIdRegex,
+		tooltip: 'Pick an intercom group, or type a group id to configure the button before the connection is up.',
+		description: 'Group ids can be typed, so buttons can be built before the connection is up.',
+	}
 }
 
 function asMuteMode(value: unknown): MuteMode {
@@ -72,8 +130,8 @@ export function UpdateActions(self: ModuleInstance): void {
 			},
 		},
 		listen_mute: {
-			name: 'Listen Mute On/Off/Toggle',
-			description: 'Mutes or unmutes the Shoutbox listen channel.',
+			name: 'Output Mute On/Off/Toggle',
+			description: 'Mutes or unmutes the Output, everything the participant hears.',
 			options: [
 				{
 					id: 'mode',
@@ -89,34 +147,34 @@ export function UpdateActions(self: ModuleInstance): void {
 				},
 			],
 			callback: async (event) => {
-				await self.runCrewLanAction('Listen Mute', async () => {
+				await self.runCrewLanAction('Output Mute', async () => {
 					await self.setListenMuteMode(asMuteMode(event.options.mode))
 				})
 			},
 		},
 		talk_push_down: {
-			name: 'Talk Push Down',
-			description: 'Opens the talk channel. Pair with "Talk Push Up" on the button release.',
+			name: 'Global Talk Push Down',
+			description: 'Opens Global Talk. Pair with "Global Talk Push Up" on the button release.',
 			options: [],
 			callback: async () => {
-				await self.runCrewLanAction('Talk Push Down', async () => {
+				await self.runCrewLanAction('Global Talk Push Down', async () => {
 					await self.setTalkState(true, 'push')
 				})
 			},
 		},
 		talk_push_up: {
-			name: 'Talk Push Up',
-			description: 'Closes the talk channel. Retried automatically; a final failure is logged as an error.',
+			name: 'Global Talk Push Up',
+			description: 'Closes Global Talk. Retried automatically; a final failure is logged as an error.',
 			options: [],
 			callback: async () => {
-				await self.runCrewLanAction('Talk Push Up', async () => {
+				await self.runCrewLanAction('Global Talk Push Up', async () => {
 					await self.setTalkState(false, 'push')
 				})
 			},
 		},
 		talk_latch: {
-			name: 'Talk Latch Toggle/On/Off',
-			description: 'Opens or closes the talk channel and keeps it in that state until changed again.',
+			name: 'Global Talk Latch Toggle/On/Off',
+			description: 'Opens or closes Global Talk and keeps it in that state until changed again.',
 			options: [
 				{
 					id: 'mode',
@@ -132,7 +190,7 @@ export function UpdateActions(self: ModuleInstance): void {
 				},
 			],
 			callback: async (event) => {
-				await self.runCrewLanAction('Talk Latch', async () => {
+				await self.runCrewLanAction('Global Talk Latch', async () => {
 					await self.setTalkLatchMode(asLatchMode(event.options.mode))
 				})
 			},
@@ -166,6 +224,121 @@ export function UpdateActions(self: ModuleInstance): void {
 			callback: async (event) => {
 				await self.runCrewLanAction('Run Macro', async () => {
 					await self.runCrewLanMacro(String(event.options.macroId ?? ''))
+				})
+			},
+		},
+		input_mute: {
+			name: 'Input Mute On/Off/Toggle',
+			description: 'Mutes or unmutes the Input, the microphone. Needs a Workspace serving /api/v2.',
+			options: [
+				{
+					id: 'mode',
+					type: 'dropdown',
+					label: 'Mode',
+					default: 'toggle',
+					choices: [
+						{ id: 'toggle', label: 'Toggle' },
+						{ id: 'on', label: 'Muted' },
+						{ id: 'off', label: 'Unmuted' },
+					],
+					disableAutoExpression: true,
+				},
+			],
+			callback: async (event) => {
+				await self.runCrewLanAction('Input Mute', async () => {
+					await self.setInputMuteMode(asMuteMode(event.options.mode))
+				})
+			},
+		},
+		group_talk_push_down: {
+			name: 'Group Talk Push Down',
+			description:
+				'Talks to one intercom group. Pair with "Group Talk Push Up" on the button release. Needs a Workspace serving /api/v2.',
+			options: [groupOption(self)],
+			callback: async (event) => {
+				await self.runCrewLanAction('Group Talk Push Down', async () => {
+					await self.setGroupTalk(String(event.options.groupId ?? ''), true, 'push')
+				})
+			},
+		},
+		group_talk_push_up: {
+			name: 'Group Talk Push Up',
+			description: 'Stops talking to one intercom group. Letting go is never refused.',
+			options: [groupOption(self)],
+			callback: async (event) => {
+				await self.runCrewLanAction('Group Talk Push Up', async () => {
+					await self.setGroupTalk(String(event.options.groupId ?? ''), false, 'push')
+				})
+			},
+		},
+		group_talk_latch: {
+			name: 'Group Talk Latch Toggle/On/Off',
+			description:
+				'Starts or stops talking to one intercom group and keeps it that way until changed again. Needs a Workspace serving /api/v2.',
+			options: [
+				groupOption(self),
+				{
+					id: 'mode',
+					type: 'dropdown',
+					label: 'Mode',
+					default: 'toggle',
+					choices: [
+						{ id: 'toggle', label: 'Toggle' },
+						{ id: 'on', label: 'On' },
+						{ id: 'off', label: 'Off' },
+					],
+					disableAutoExpression: true,
+				},
+			],
+			callback: async (event) => {
+				await self.runCrewLanAction('Group Talk Latch', async () => {
+					await self.setGroupTalkLatchMode(String(event.options.groupId ?? ''), asLatchMode(event.options.mode))
+				})
+			},
+		},
+		group_mute: {
+			name: 'Group Mute On/Off/Toggle',
+			description:
+				'Mutes or unmutes what the participant hears of one intercom group, keeping its level. Needs a Workspace serving /api/v2.',
+			options: [
+				groupOption(self),
+				{
+					id: 'mode',
+					type: 'dropdown',
+					label: 'Mode',
+					default: 'toggle',
+					choices: [
+						{ id: 'toggle', label: 'Toggle' },
+						{ id: 'on', label: 'Muted' },
+						{ id: 'off', label: 'Unmuted' },
+					],
+					disableAutoExpression: true,
+				},
+			],
+			callback: async (event) => {
+				await self.runCrewLanAction('Group Mute', async () => {
+					await self.setGroupMuteMode(String(event.options.groupId ?? ''), asMuteMode(event.options.mode))
+				})
+			},
+		},
+		call_answer: {
+			name: 'Direct: Answer',
+			description:
+				'Answers the direct call of whoever rings first. Does nothing when nobody rings or while you are already in a call. Needs a Workspace serving /api/v2.',
+			options: [],
+			callback: async () => {
+				await self.runCrewLanAction('Answer', async () => {
+					await self.answerCall()
+				})
+			},
+		},
+		call_hang_up: {
+			name: 'Direct: Hang up',
+			description: 'Hangs up the current call. Does nothing when there is none. Needs a Workspace serving /api/v2.',
+			options: [],
+			callback: async () => {
+				await self.runCrewLanAction('Hang up', async () => {
+					await self.hangUpCall()
 				})
 			},
 		},

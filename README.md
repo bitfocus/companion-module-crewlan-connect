@@ -2,9 +2,9 @@
 
 Bitfocus Companion module for CrewLAN Connect.
 
-The module binds to exactly one CrewLAN entity through a CrewLAN entity token. It can set that entity's status, dismiss current alerts, run workspace macros, control Shoutbox listen mute, control talk in push or latch mode, and expose live feedback/variables from the CrewLAN event stream.
+The module binds to exactly one CrewLAN entity through a CrewLAN entity token. It speaks the integration API `/api/v2` where the workspace serves it — `GET /api/v2` answered `404`, or answered with a success that is no v2 description (an HTML page or another body), means the Public API v1; any refusal on it fails the connection as every request does — and keeps to one API per connection. It can set that entity's status, dismiss current alerts, run workspace macros, work its Intercom — Global Talk in push or latch mode, the Output and Input mutes, a Talk and a Mute per group, answering and hanging up a direct call — and expose live feedback/variables from the CrewLAN event stream. Over the Public API v1 it keeps statuses, macros, alerts and the one Global Talk and Output.
 
-Macro buttons are generated from whatever CrewLAN publishes, in the same way status buttons are. A CrewLAN without macro support answers 404 on the macro collection, which the module treats as "no macros" rather than as a failure, so the connection still comes up.
+Macro buttons are generated from whatever CrewLAN publishes, in the same way status buttons are. A CrewLAN without macro support answers 404 on the Public API v1's macro collection, which the module treats as "no macros" rather than as a failure, so the connection still comes up.
 
 ## Configuration
 
@@ -32,9 +32,10 @@ yarn package         # build the distributable .tgz with companion-module-build
 
 ### Why there is a second distribution channel
 
-The Bitfocus module store is the intended channel for this module. Until the module is approved and
-ships with Companion, CrewLAN users still need a way to install it, so every release is also
-published as the `.tgz` that `yarn package` produces, for manual import into Companion.
+The Bitfocus module store is this module's channel: Bitfocus approved the module, and Companion
+users install it from the store. A version reaches the store once Bitfocus has reviewed it, so
+every release is also published as the `.tgz` that `yarn package` produces, which Companion imports
+by hand.
 
 **Both channels carry the same version number.** The full SemVer in `package.json` is the only
 version written by hand anywhere in this repository:
@@ -50,18 +51,20 @@ so a release cannot be tagged or published under a version that differs from the
 reports:
 
 ```sh
-node scripts/module-version.mjs read-package-version   # 1.4.1
-node scripts/module-version.mjs release-tag            # v1.4.1
-node scripts/module-version.mjs package-asset          # crewlan-connect-1.4.1.tgz
-node scripts/module-version.mjs set-package-version 1.5.0
+node scripts/module-version.mjs set-package-version 2.0.0
+node scripts/module-version.mjs read-package-version   # 2.0.0
+node scripts/module-version.mjs release-tag            # v2.0.0
+node scripts/module-version.mjs package-asset          # crewlan-connect-2.0.0.tgz
 ```
 
-This is a stopgap, not a parallel product. Once the module is released in the store, the store
-becomes the only channel users are pointed at, and this tooling can be retired.
+The `.tgz` carries the store's version, not a parallel product: the store is the channel users are
+pointed at.
 
 ## Deviations from the module template
 
-The repository is the Bitfocus TypeScript module template. `.gitattributes`, `.prettierignore` and
+The repository is the Bitfocus TypeScript module template at its commit `d62230e`, on Node 22 and
+`@companion-module/base` 2.0.4; the template's later move to Node 26 and `@companion-module/base`
+2.1 is not taken up here. `.gitattributes`, `.prettierignore` and
 `.yarnrc.yml` carry no changes of substance — the latter two differ only where `yarn format`
 normalised them. Two more files differ by one edit each, both of them trivial but neither of them
 nothing: `.gitignore` keeps every template entry and appends a `# module-specific` section for
@@ -107,6 +110,7 @@ is the unmodified MIT text the manifest and `package.json` declare.
 
 - `src/main.ts` — the Companion instance: connection lifecycle, event stream, polling, state and publishing.
 - `src/api.ts` — the CrewLAN Public API v1 client: deadlines, error classification and the incremental event-stream parser.
+- `src/api-v2.ts` — the CrewLAN integration API v2 client: the `GET /api/v2` probe that decides which API a connection speaks, the snapshot, the requests and the event stream, translated into the Public API v1's shapes the rest of the module reads.
 - `src/guards.ts` — runtime type guards applied to every payload at the API boundary.
-- `src/button-style.ts` — the shared colour and label maths behind status and macro buttons.
+- `src/button-style.ts` — the shared colour and label maths behind status and macro buttons, and the offline grey every preset's base style carries.
 - `src/actions.ts`, `src/feedbacks.ts`, `src/variables.ts`, `src/presets.ts`, `src/config.ts`, `src/upgrades.ts` — the Companion surface.

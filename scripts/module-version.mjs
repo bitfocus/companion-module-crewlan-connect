@@ -1,9 +1,10 @@
 /**
- * Release naming for the interim CrewLAN distribution channel.
+ * Release naming for the module's second distribution channel, the downloadable .tgz.
  *
- * The Bitfocus module store is the intended channel for this module. Until it is approved and ships
- * with Companion, CrewLAN users still need a way to install it, so every release is also published
- * as the .tgz that `yarn package` produces, for manual import into Companion.
+ * The Bitfocus module store is this module's channel: Bitfocus approved the module, and Companion
+ * users install it from the store. A version reaches the store once Bitfocus has reviewed it, so
+ * every release is also published as the .tgz that `yarn package` produces, which Companion
+ * imports by hand.
  *
  * There is exactly one version number, and both channels use it: the full SemVer in package.json.
  * `companion-module-build` stamps it into companion/manifest.json, the git tag is `v<version>`, and
@@ -11,8 +12,7 @@
  * package.json rather than taking it as an argument, so a release cannot be tagged or published
  * under a version that differs from the one Companion reports.
  *
- * This is repository tooling only: it is never packaged into the module, and it can be retired once
- * the module is available in the store.
+ * This is repository tooling only: it is never packaged into the module.
  */
 import { readFileSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
@@ -32,7 +32,7 @@ export function releaseTag(version) {
 	return `v${assertModuleVersion(version)}`
 }
 
-/** The .tgz `yarn package` emits, which is also the asset the interim channel offers for download. */
+/** The .tgz `yarn package` emits, also offered for download as the second channel beside the module store. */
 export function packageAsset(version) {
 	return `crewlan-connect-${assertModuleVersion(version)}.tgz`
 }

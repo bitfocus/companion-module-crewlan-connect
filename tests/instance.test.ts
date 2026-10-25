@@ -3,7 +3,7 @@ import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { after, before, describe, it } from 'node:test'
 import { setTimeout as sleep } from 'node:timers/promises'
-import ModuleInstance from '../src/main.js'
+import ModuleInstance, { ownerAbsentMessage } from '../src/main.js'
 import type { PublicEntityControlsDto, PublicEntityStatusDto, PublicMacroDto, PublicStatusDto } from '../src/types.js'
 
 /**
@@ -57,6 +57,8 @@ interface Stub {
 	 * for a reverse proxy that does not do SSE or a CrewLAN restarting in a loop.
 	 */
 	flapStream: boolean
+	/** When true every write answers v1's bare 401, as CrewLAN does while the Entity is not present. */
+	refuseWrites: boolean
 	controls: PublicEntityControlsDto
 	status: PublicEntityStatusDto
 	stream: http.ServerResponse | null
@@ -92,6 +94,7 @@ async function startCrewLanStub(): Promise<Stub> {
 		macrosSupported: true,
 		offline: false,
 		flapStream: false,
+		refuseWrites: false,
 		stream: null,
 		close: async () => undefined,
 	}
@@ -113,6 +116,12 @@ async function startCrewLanStub(): Promise<Stub> {
 			const json = (data: unknown): void => {
 				response.writeHead(200, { 'content-type': 'application/json' })
 				response.end(JSON.stringify({ data, meta }))
+			}
+
+			if (stub.refuseWrites && request.method !== 'GET') {
+				response.writeHead(401, { 'content-type': 'application/json' })
+				response.end(JSON.stringify({ error: 'unauthorized', message: 'Entity access is required.' }))
+				return
 			}
 
 			if (path === '/api/v1/events') {
@@ -362,9 +371,9 @@ describe('module against a CrewLAN stub', () => {
 	})
 
 	it('registers its full Companion surface', () => {
-		assert.equal(host.registered.actions.length, 8)
-		assert.equal(host.registered.feedbacks.length, 14)
-		assert.equal(host.registered.variables.length, 20)
+		assert.equal(host.registered.actions.length, 15)
+		assert.equal(host.registered.feedbacks.length, 23)
+		assert.equal(host.registered.variables.length, 24)
 		// Four fixed presets, one per selectable status, one per runnable macro.
 		assert.equal(host.registered.presets.length, 7)
 		assert.ok(host.registered.presets.includes('macro_macro-showstart'))
@@ -448,6 +457,76 @@ describe('module against a CrewLAN stub', () => {
 		assert.ok(lastCheck.includes('talk_live'), 'controls feedbacks are rechecked')
 		assert.ok(!lastCheck.includes('connection_ok'), 'unrelated feedbacks are not rechecked')
 		assert.ok(!lastCheck.includes('status_is'), 'unrelated feedbacks are not rechecked')
+	})
+
+	it('greys over v1 while the owner is absent, by a refused write and by an offline status', async () => {
+		const statusFrame = (id: number, statusId: string) =>
+			`id: ${id}\nevent: status.changed\ndata: ${JSON.stringify({
+				id: String(id),
+				type: 'status.changed',
+				occurredAt: laterIso(id * 1000),
+				meta,
+				data: {
+					entityId: 'alex',
+					status: makeStatus(statusId, statusId),
+					selectedStatusId: 'sys-green',
+					updatedAt: laterIso(id * 1000),
+				},
+			})}\n\n`
+
+		stub.refuseWrites = true
+		await host.instance.runCrewLanAction('Output Mute', async () => host.instance.setListenMuteMode('on'))
+		stub.refuseWrites = false
+		assert.equal(host.instance.getCrewLanState().ownerPresent, false)
+		assert.equal(host.status, 'ok')
+		assert.ok(
+			host.logs.some((line) => line.startsWith('warn: Output Mute:') && line.endsWith(`(${ownerAbsentMessage})`)),
+		)
+
+		await waitFor(() => stub.stream !== null && host.variables.event_stream_connected === true, 'the event stream')
+		stub.stream?.write(statusFrame(31, 'sys-green'))
+		await waitFor(() => host.instance.getCrewLanState().ownerPresent, 'the owner to be present again')
+		// CrewLAN shows an absent Entity offline and keeps what it chose for when it comes back.
+		stub.stream?.write(statusFrame(32, 'sys-offline'))
+		await waitFor(() => !host.instance.getCrewLanState().ownerPresent, 'an offline status to grey the buttons')
+		stub.stream?.write(statusFrame(33, 'sys-green'))
+		await waitFor(() => host.instance.getCrewLanState().ownerPresent, 'the owner to be present again')
+	})
+
+	it("lifts a refusal by CrewLAN's own clock, never by this machine's", async () => {
+		// CrewLAN's clock runs an hour ahead of Companion's.
+		const crewLanNow = Date.now() + 3_600_000
+		const statusFrame = (id: number, updatedAt: number) =>
+			`id: ${id}\nevent: status.changed\ndata: ${JSON.stringify({
+				id: String(id),
+				type: 'status.changed',
+				occurredAt: new Date(updatedAt).toISOString(),
+				meta,
+				data: {
+					entityId: 'alex',
+					status: makeStatus('sys-green', 'OK'),
+					selectedStatusId: 'sys-green',
+					updatedAt: new Date(updatedAt).toISOString(),
+				},
+			})}\n\n`
+
+		stub.stream?.write(statusFrame(41, crewLanNow))
+		await waitFor(
+			() => host.instance.getCrewLanState().status?.updatedAt === new Date(crewLanNow).toISOString(),
+			'the skewed status to be held',
+		)
+		stub.refuseWrites = true
+		await host.instance.runCrewLanAction('Output Mute', async () => host.instance.setListenMuteMode('on'))
+		stub.refuseWrites = false
+		assert.equal(host.instance.getCrewLanState().ownerPresent, false)
+
+		// The same status again, later than this machine's clock but not changed: still grey.
+		stub.stream?.write(statusFrame(42, crewLanNow))
+		await sleep(300)
+		assert.equal(host.instance.getCrewLanState().ownerPresent, false)
+
+		stub.stream?.write(statusFrame(43, crewLanNow + 1000))
+		await waitFor(() => host.instance.getCrewLanState().ownerPresent, 'a later status to lift the refusal')
 	})
 
 	it('records an alert and survives a malformed frame split across chunks', async () => {
@@ -573,6 +652,25 @@ describe('module against a CrewLAN stub', () => {
 		await waitFor(() => host.status !== 'ok', 'the connection to be reported as broken')
 		await waitFor(() => host.variables.running_macro_count === 0, 'the running flag to be cleared')
 		assert.equal(host.registered.presets.length, presetsBefore, 'the macro buttons survive the disconnect')
+	})
+
+	it('probes /api/v2 at the connect and keeps the v2-only acts to a warning over v1', async () => {
+		assert.equal(host.instance.getCrewLanState().api, 'v1')
+		assert.ok(stub.calls.includes('GET /api/v2'))
+		const before = stub.calls.length
+
+		await host.instance.setInputMuteMode('on')
+		await host.instance.setGroupTalk('everyone', true, 'push')
+		await host.instance.setGroupMuteMode('everyone', 'toggle')
+		await host.instance.answerCall()
+		await host.instance.hangUpCall()
+
+		assert.equal(stub.calls.length, before)
+		assert.ok(
+			host.logs.includes(
+				'warn: Answer needs a CrewLAN Workspace serving /api/v2; this one speaks the Public API v1 and has only Global Talk and Output.',
+			),
+		)
 	})
 
 	it('makes no further requests after destroy', async () => {

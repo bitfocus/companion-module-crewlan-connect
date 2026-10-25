@@ -7,6 +7,13 @@ export const inactiveBackgroundDimFactor = 0.32
 const statusFallbackBackground = 0x2979ff
 /** Fallback background when CrewLAN sends an unusable macro colour. */
 const macroFallbackBackground = 0x8e24aa
+/**
+ * The offline look, one colour pair: dark grey ground, light grey text. Every preset's base style
+ * is this, and its first feedback paints the ordinary style while the connection is ready, because
+ * a disabled Companion connection runs no module and Companion then shows the base style alone.
+ */
+export const offlineBackgroundColor = 0x2b2b2b
+export const offlineTextColor = 0xa0a0a0
 
 const identitySystemStatusLabels: Record<string, string> = {
 	'sys-green': 'Ready',
@@ -133,4 +140,15 @@ export function getCompanionMacroButtonStyle(macro: PublicMacroDto, running: boo
 		active: running,
 		fallbackBackground: macroFallbackBackground,
 	})
+}
+
+/** The full offline button style, with the button's own text, used as every preset's base style. */
+export function getOfflineButtonStyle(text: string): CompanionButtonStyleProps {
+	return {
+		text,
+		size: buttonFontSize,
+		color: offlineTextColor,
+		bgcolor: offlineBackgroundColor,
+		show_topbar: false,
+	}
 }

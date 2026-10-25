@@ -24,6 +24,7 @@ import type {
 	PublicSessionDto,
 	PublicStatusDto,
 	PublicWorkspaceDto,
+	IntegrationEventEnvelope,
 } from './types.js'
 
 /** Default deadline for a single REST request, as required of the CrewLAN API. */
@@ -73,6 +74,11 @@ export class CrewLanApiError extends Error {
 		message: string,
 		public readonly statusCode: number | null = null,
 		public readonly kind: CrewLanApiErrorKind = statusCode === null ? 'client' : 'http',
+		/**
+		 * The `error` code of the server's refusal body (`connection_owner_absent` over `/api/v2`,
+		 * `forbidden` over v1), or the code an `event: ended` named; null where none was read.
+		 */
+		public readonly code: string | null = null,
 	) {
 		super(message)
 		this.name = 'CrewLanApiError'
@@ -113,6 +119,10 @@ export interface StreamEventsOptions {
 	onEvent: (event: PublicEventEnvelope) => void
 	/** Called once the server accepted the stream (response headers received). */
 	onOpen?: () => void
+	/** `/api/v2` only: an event the v1 shapes do not carry, handed on as its envelope. */
+	onIntegrationEvent?: (event: IntegrationEventEnvelope) => void
+	/** `/api/v2` only: the stream missed events (`event: gap`); the caller reads its state again. */
+	onGap?: () => void
 	/**
 	 * Abort the stream when no bytes (events or keepalive comments) arrived for this long.
 	 * 0 disables the watchdog.
@@ -184,7 +194,7 @@ export function normalizeBaseUrl(value: string): string {
 	return url.toString().replace(/\/$/u, '')
 }
 
-function describeCause(error: unknown): string {
+export function describeCause(error: unknown): string {
 	if (error instanceof Error) {
 		const cause = error.cause
 
@@ -198,8 +208,14 @@ function describeCause(error: unknown): string {
 	return String(error)
 }
 
-function truncate(value: string, maxLength = 200): string {
+export function truncate(value: string, maxLength = 200): string {
 	return value.length > maxLength ? `${value.slice(0, maxLength)}…` : value
+}
+
+/** One dispatched event-stream frame: its `event:` name (`message` where it named none) and its data. */
+export interface ServerSentEventFrame {
+	event: string
+	data: string
 }
 
 /**
@@ -212,6 +228,7 @@ function truncate(value: string, maxLength = 200): string {
 export class ServerSentEventParser {
 	private buffer = ''
 	private dataLines: string[] = []
+	private eventName = ''
 	/** Length of the `data` lines already accepted for the event that has not been dispatched yet. */
 	private pendingFrameLength = 0
 
@@ -219,10 +236,15 @@ export class ServerSentEventParser {
 
 	/** Feed a chunk of text and receive the `data` payloads of every event completed by it. */
 	push(chunk: string): string[] {
+		return this.pushFrames(chunk).map((frame) => frame.data)
+	}
+
+	/** As `push`, keeping each frame's `event:` name, which `/api/v2` uses for `gap` and `ended`. */
+	pushFrames(chunk: string): ServerSentEventFrame[] {
 		this.buffer += chunk
 		this.assertWithinLimit()
 
-		const payloads: string[] = []
+		const payloads: ServerSentEventFrame[] = []
 		let start = 0
 
 		// `carriageReturn` is only re-scanned once the previous hit is consumed, so a stream that uses
@@ -272,7 +294,12 @@ export class ServerSentEventParser {
 
 	/** Dispatch an event whose final blank line never arrived (end of stream). */
 	flush(): string[] {
-		const payloads: string[] = []
+		return this.flushFrames().map((frame) => frame.data)
+	}
+
+	/** As `flush`, keeping each frame's `event:` name. */
+	flushFrames(): ServerSentEventFrame[] {
+		const payloads: ServerSentEventFrame[] = []
 		const trailing = this.buffer.replace(/\r$/u, '')
 		this.buffer = ''
 
@@ -307,8 +334,11 @@ export class ServerSentEventParser {
 		}
 	}
 
-	private processLine(line: string): string | null {
+	private processLine(line: string): ServerSentEventFrame | null {
 		if (line.length === 0) {
+			const event = this.eventName.length > 0 ? this.eventName : 'message'
+			this.eventName = ''
+
 			if (this.dataLines.length === 0) {
 				return null
 			}
@@ -316,7 +346,7 @@ export class ServerSentEventParser {
 			const payload = this.dataLines.join('\n')
 			this.dataLines = []
 			this.pendingFrameLength = 0
-			return payload
+			return { event, data: payload }
 		}
 
 		if (line.startsWith(':')) {
@@ -331,7 +361,9 @@ export class ServerSentEventParser {
 			fieldValue = fieldValue.slice(1)
 		}
 
-		if (field === 'data') {
+		if (field === 'event') {
+			this.eventName = fieldValue
+		} else if (field === 'data') {
 			this.dataLines.push(fieldValue)
 			// +1 for the newline the lines are joined with when the frame is dispatched.
 			this.pendingFrameLength += fieldValue.length + 1
@@ -519,7 +551,28 @@ export class CrewLanApiClient {
 	 * abort resolves quietly.
 	 */
 	async streamEvents(options: StreamEventsOptions): Promise<void> {
-		const { signal, onEvent } = options
+		await this.openEventStream(
+			`/api/v1/events?types=${subscribedEventTypes(options.includeMacroEvents === true)}`,
+			options,
+			(frames) =>
+				this.dispatchEvents(
+					frames.map((frame) => frame.data),
+					options.onEvent,
+				),
+		)
+	}
+
+	/**
+	 * The event-stream transport both APIs share: the handshake deadline, the idle watchdog and the
+	 * abort handling, handing every completed frame to `onFrames`. A throw from `onFrames` ends the
+	 * stream with that error, which is how `/api/v2`'s `event: ended` is reported.
+	 */
+	async openEventStream(
+		path: string,
+		options: StreamEventsOptions,
+		onFrames: (frames: ServerSentEventFrame[]) => void,
+	): Promise<void> {
+		const { signal } = options
 		const idleTimeoutMs = options.idleTimeoutMs ?? 0
 		// The handshake gets a deadline; the open stream is governed only by the caller's signal and
 		// the idle watchdog, so the fetch abort must not be tied to a fixed timer.
@@ -534,13 +587,10 @@ export class CrewLanApiClient {
 		let response: Response
 
 		try {
-			response = await fetch(
-				`${this.baseUrl}/api/v1/events?types=${subscribedEventTypes(options.includeMacroEvents === true)}`,
-				{
-					headers: this.headers({ accept: 'text/event-stream' }),
-					signal: fetchAbort.signal,
-				},
-			)
+			response = await fetch(`${this.baseUrl}${path}`, {
+				headers: this.headers({ accept: 'text/event-stream' }),
+				signal: fetchAbort.signal,
+			})
 		} catch (error) {
 			signal.removeEventListener('abort', abortFetch)
 
@@ -567,7 +617,8 @@ export class CrewLanApiClient {
 			// The listener stays attached until the error body has been read (or timed out), so a caller
 			// abort during that read still tears the request down.
 			try {
-				throw new CrewLanApiError(await this.errorMessage(response, 'CrewLAN event stream failed'), response.status)
+				const detail = await this.errorDetail(response, 'CrewLAN event stream failed')
+				throw new CrewLanApiError(detail.message, response.status, 'http', detail.code)
 			} finally {
 				signal.removeEventListener('abort', abortFetch)
 			}
@@ -608,11 +659,11 @@ export class CrewLanApiClient {
 				}
 
 				if (result.done) {
-					this.dispatchEvents(parser.flush(), onEvent)
+					onFrames(parser.flushFrames())
 					return
 				}
 
-				this.dispatchEvents(parser.push(decoder.decode(result.value, { stream: true })), onEvent)
+				onFrames(parser.pushFrames(decoder.decode(result.value, { stream: true })))
 			}
 		} finally {
 			signal.removeEventListener('abort', cancelOnAbort)
@@ -642,7 +693,11 @@ export class CrewLanApiClient {
 		return `/api/v1/entities/${encodeURIComponent(entityId)}`
 	}
 
-	private async request<T>(path: string, init: RequestInit, options: RequestOptions, guard: Guard<T>): Promise<T> {
+	/**
+	 * One REST request under this client's deadline and error classification, its body checked by
+	 * `guard`. Public so the `/api/v2` client speaks through the same transport.
+	 */
+	async request<T>(path: string, init: RequestInit, options: RequestOptions, guard: Guard<T>): Promise<T> {
 		const timeoutMs = options.timeoutMs ?? this.timeoutMs
 		const timeout = AbortSignal.timeout(timeoutMs)
 		const signal = options.signal === undefined ? timeout : AbortSignal.any([options.signal, timeout])
@@ -663,7 +718,8 @@ export class CrewLanApiClient {
 		}
 
 		if (!response.ok) {
-			throw new CrewLanApiError(await this.errorMessage(response, 'CrewLAN API request failed'), response.status)
+			const detail = await this.errorDetail(response, 'CrewLAN API request failed')
+			throw new CrewLanApiError(detail.message, response.status, 'http', detail.code)
 		}
 
 		let body: unknown
@@ -727,8 +783,8 @@ export class CrewLanApiClient {
 	 * stream nothing else would close that socket either, because the handshake deadline is already
 	 * cleared once the response headers have arrived.
 	 */
-	private async errorMessage(response: Response, prefix: string): Promise<string> {
-		const fallback = `${prefix} with HTTP ${String(response.status)}.`
+	private async errorDetail(response: Response, prefix: string): Promise<{ message: string; code: string | null }> {
+		const fallback = { message: `${prefix} with HTTP ${String(response.status)}.`, code: null }
 		const body = response.body
 
 		if (body === null) {
@@ -757,14 +813,14 @@ export class CrewLanApiClient {
 
 			const parsed: unknown = JSON.parse(text)
 
-			if (
-				typeof parsed === 'object' &&
-				parsed !== null &&
-				'message' in parsed &&
-				typeof parsed.message === 'string' &&
-				parsed.message.trim().length > 0
-			) {
-				return parsed.message
+			if (typeof parsed === 'object' && parsed !== null) {
+				const code = 'error' in parsed && typeof parsed.error === 'string' ? parsed.error : null
+
+				if ('message' in parsed && typeof parsed.message === 'string' && parsed.message.trim().length > 0) {
+					return { message: parsed.message, code }
+				}
+
+				return { message: fallback.message, code }
 			}
 		} catch {
 			// Keep the HTTP fallback message: a truncated, non-JSON or absent body is not an error of

@@ -1,4 +1,13 @@
 import type {
+	IntegrationDescription,
+	IntegrationEntityStatusView,
+	IntegrationEventEnvelope,
+	IntegrationGroupList,
+	IntegrationGroupView,
+	IntegrationIntercomControls,
+	IntegrationMacroView,
+	IntegrationSnapshot,
+	IntegrationStatusView,
 	PublicAlertTriggeredEventData,
 	PublicMacroDto,
 	PublicMacroRemovedEventData,
@@ -171,4 +180,112 @@ export function isItemResponse<T>(guard: Guard<T>): Guard<{ data: T }> {
 
 export function isAnything(_value: unknown): _value is unknown {
 	return true
+}
+
+function isNumber(value: unknown): value is number {
+	return typeof value === 'number' && Number.isFinite(value)
+}
+
+function isTalkKey(value: unknown): value is 'push' | 'latch' {
+	return value === 'push' || value === 'latch'
+}
+
+function isCallerRef(value: unknown): value is { callerId: string } {
+	return isRecord(value) && isString(value.callerId)
+}
+
+export function isIntegrationDescription(value: unknown): value is IntegrationDescription {
+	return (
+		isRecord(value) &&
+		value.api === 'v2' &&
+		isArrayOf(value.requests, (request): request is { wireId: string } => isRecord(request) && isString(request.wireId))
+	)
+}
+
+export function isIntegrationStatusView(value: unknown): value is IntegrationStatusView {
+	return (
+		isRecord(value) &&
+		isString(value.id) &&
+		isBoolean(value.builtIn) &&
+		isNullableString(value.label) &&
+		isString(value.color) &&
+		isBoolean(value.selectable)
+	)
+}
+
+export function isIntegrationEntityStatusView(value: unknown): value is IntegrationEntityStatusView {
+	return isRecord(value) && isString(value.entityId) && isString(value.statusId) && isString(value.chosenStatusId)
+}
+
+export function isIntegrationMacroView(value: unknown): value is IntegrationMacroView {
+	return (
+		isRecord(value) &&
+		isString(value.id) &&
+		isString(value.name) &&
+		isString(value.color) &&
+		isBoolean(value.running) &&
+		(value.runnable === undefined || isBoolean(value.runnable))
+	)
+}
+
+export function isIntegrationSnapshot(value: unknown): value is IntegrationSnapshot {
+	return (
+		isRecord(value) &&
+		isRecord(value.workspace) &&
+		isNullableString(value.workspace.id) &&
+		isString(value.workspace.name) &&
+		isRecord(value.entity) &&
+		isString(value.entity.id) &&
+		isString(value.entity.displayIdentity) &&
+		isArrayOf(
+			value.participants,
+			(participant): participant is { id: string; displayIdentity: string } =>
+				isRecord(participant) && isString(participant.id) && isString(participant.displayIdentity),
+		) &&
+		isRecord(value.statuses) &&
+		isArrayOf(value.statuses.statuses, isIntegrationStatusView) &&
+		isArrayOf(value.statuses.entities, isIntegrationEntityStatusView) &&
+		isArrayOf(value.macros, isIntegrationMacroView)
+	)
+}
+
+export function isIntegrationIntercomControls(value: unknown): value is IntegrationIntercomControls {
+	return (
+		isRecord(value) &&
+		isBoolean(value.inputMuted) &&
+		isBoolean(value.outputMuted) &&
+		isRecord(value.globalTalk) &&
+		isBoolean(value.globalTalk.held) &&
+		(value.globalTalk.talkKey === null || isTalkKey(value.globalTalk.talkKey)) &&
+		isArrayOf(
+			value.groupTalk,
+			(entry): entry is { groupId: string; talkKey: 'push' | 'latch' } =>
+				isRecord(entry) && isString(entry.groupId) && isTalkKey(entry.talkKey),
+		) &&
+		(value.call === null || isCallerRef(value.call)) &&
+		isArrayOf(value.ringing, isCallerRef) &&
+		isRecord(value.audio) &&
+		isBoolean(value.audio.connected) &&
+		isBoolean(value.audio.sending)
+	)
+}
+
+export function isIntegrationGroupView(value: unknown): value is IntegrationGroupView {
+	return (
+		isRecord(value) &&
+		isString(value.id) &&
+		isNullableString(value.name) &&
+		isBoolean(value.everyone) &&
+		isArrayOf(value.members, isString) &&
+		(value.listening === null ||
+			(isRecord(value.listening) && isNumber(value.listening.gainDb) && isBoolean(value.listening.muted)))
+	)
+}
+
+export function isIntegrationGroupList(value: unknown): value is IntegrationGroupList {
+	return isRecord(value) && isArrayOf(value.groups, isIntegrationGroupView)
+}
+
+export function isIntegrationEventEnvelope(value: unknown): value is IntegrationEventEnvelope {
+	return isRecord(value) && isString(value.wireId) && isString(value.occurredAt) && isRecord(value.payload)
 }

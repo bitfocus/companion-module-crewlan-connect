@@ -1,4 +1,5 @@
 import { combineRgb } from '@companion-module/base'
+import { groupOption } from './actions.js'
 import { macroIdRegex, statusIdRegex } from './config.js'
 import type ModuleInstance from './main.js'
 import { getCompanionMacroStyle, getCompanionStatusStyle } from './button-style.js'
@@ -18,12 +19,46 @@ export type FeedbacksSchema = {
 	talk_live: { type: 'boolean'; options: Record<string, never> }
 	macro_running: { type: 'boolean'; options: { macroId: string } }
 	macro_style: { type: 'advanced'; options: { macroId: string } }
+	connection_ready: { type: 'boolean'; options: Record<string, never> }
+	input_muted: { type: 'boolean'; options: Record<string, never> }
+	group_talk_available: { type: 'boolean'; options: { groupId: string } }
+	group_talk_active: { type: 'boolean'; options: { groupId: string } }
+	group_muted: { type: 'boolean'; options: { groupId: string } }
+	call_ringing: { type: 'boolean'; options: Record<string, never> }
+	call_active: { type: 'boolean'; options: Record<string, never> }
+	answer_available: { type: 'boolean'; options: Record<string, never> }
+	group_member: { type: 'boolean'; options: { groupId: string } }
 }
 
 function isCurrentStatus(self: ModuleInstance, statusId: string): boolean {
 	const currentStatus = self.getCrewLanState().status
 
 	return statusId.length > 0 && (currentStatus?.selectedStatusId === statusId || currentStatus?.status.id === statusId)
+}
+
+/**
+ * Connected, and the bound Entity is present at a Client, so CrewLAN accepts its writes.
+ *
+ * Only the readiness feedbacks read this; the state feedbacks say what CrewLAN reports, ready or
+ * not, so a 1.x button and its `$(crewlan:…)` variable agree. A preset greys a key that is not
+ * ready by its last feedback, its readiness feedback inverted with the offline style, which paints
+ * over every state feedback before it.
+ */
+export function isConnectionReady(self: ModuleInstance): boolean {
+	const state = self.getCrewLanState()
+
+	return state.connected && state.ownerPresent
+}
+
+function intercomGroup(self: ModuleInstance, groupId: string | undefined) {
+	return self.getCrewLanState().intercom?.groups.find((group) => group.id === groupId)
+}
+
+/** Whether a talk key or *Answer* can be pressed: ready, with an audio connection and not in a call. */
+function intercomKeysAvailable(self: ModuleInstance): boolean {
+	const intercom = self.getCrewLanState().intercom
+
+	return isConnectionReady(self) && intercom?.audioConnected === true && intercom.call === null
 }
 
 export function UpdateFeedbacks(self: ModuleInstance): void {
@@ -38,6 +73,18 @@ export function UpdateFeedbacks(self: ModuleInstance): void {
 			},
 			options: [],
 			callback: () => self.getCrewLanState().connected,
+		},
+		connection_ready: {
+			name: 'Connection Ready',
+			description:
+				'True while the module is connected and the participant is present at a Client, so CrewLAN accepts its presses.',
+			type: 'boolean',
+			defaultStyle: {
+				bgcolor: combineRgb(48, 167, 91),
+				color: combineRgb(255, 255, 255),
+			},
+			options: [],
+			callback: () => isConnectionReady(self),
 		},
 		status_is: {
 			name: 'Current Status Is',
@@ -97,48 +144,49 @@ export function UpdateFeedbacks(self: ModuleInstance): void {
 			},
 		},
 		listen_enabled: {
-			name: 'Listen Enabled',
-			description: 'True when the Shoutbox listen channel is enabled for this entity.',
+			name: 'Output Enabled',
+			description: 'True when the Output is enabled for this entity.',
 			type: 'boolean',
 			defaultStyle: { bgcolor: combineRgb(48, 167, 91), color: combineRgb(255, 255, 255) },
 			options: [],
 			callback: () => self.getCrewLanState().controls?.shoutbox.listen.enabled === true,
 		},
 		listen_available: {
-			name: 'Listen Available',
-			description: 'True when the listen channel is available in the current workspace.',
+			name: 'Output Available',
+			description: 'True when the Output is available in the current workspace.',
 			type: 'boolean',
 			defaultStyle: { bgcolor: combineRgb(48, 167, 91), color: combineRgb(255, 255, 255) },
 			options: [],
 			callback: () => self.getCrewLanState().controls?.shoutbox.listen.available === true,
 		},
 		listen_muted: {
-			name: 'Listen Muted',
-			description: 'True while the listen channel is muted.',
+			name: 'Output Muted',
+			description: 'True while the Output is muted.',
 			type: 'boolean',
 			defaultStyle: { bgcolor: combineRgb(244, 67, 54), color: combineRgb(255, 255, 255) },
 			options: [],
 			callback: () => self.getCrewLanState().controls?.shoutbox.listen.muted === true,
 		},
 		talk_enabled: {
-			name: 'Talk Enabled',
-			description: 'True when the Shoutbox talk channel is enabled for this entity.',
+			name: 'Global Talk Enabled',
+			description: 'True when Global Talk is enabled for this entity.',
 			type: 'boolean',
 			defaultStyle: { bgcolor: combineRgb(48, 167, 91), color: combineRgb(255, 255, 255) },
 			options: [],
 			callback: () => self.getCrewLanState().controls?.shoutbox.talk.enabled === true,
 		},
 		talk_available: {
-			name: 'Talk Available',
-			description: 'True when the talk channel is available in the current workspace.',
+			name: 'Global Talk Available',
+			description:
+				'True when Global Talk can be pressed: the participant holds an audio connection and is not in a direct call.',
 			type: 'boolean',
 			defaultStyle: { bgcolor: combineRgb(48, 167, 91), color: combineRgb(255, 255, 255) },
 			options: [],
 			callback: () => self.getCrewLanState().controls?.shoutbox.talk.available === true,
 		},
 		talk_push_active: {
-			name: 'Talk Push Active',
-			description: 'True while talk is active and was opened in push mode.',
+			name: 'Global Talk Push Active',
+			description: 'True while Global Talk is active and was opened in push mode.',
 			type: 'boolean',
 			defaultStyle: { bgcolor: combineRgb(15, 207, 41), color: combineRgb(0, 0, 0) },
 			options: [],
@@ -149,8 +197,8 @@ export function UpdateFeedbacks(self: ModuleInstance): void {
 			},
 		},
 		talk_latch_active: {
-			name: 'Talk Latch Active',
-			description: 'True while talk is active and was opened in latch mode.',
+			name: 'Global Talk Latch Active',
+			description: 'True while Global Talk is active and was opened in latch mode.',
 			type: 'boolean',
 			defaultStyle: { bgcolor: combineRgb(15, 207, 41), color: combineRgb(0, 0, 0) },
 			options: [],
@@ -161,8 +209,8 @@ export function UpdateFeedbacks(self: ModuleInstance): void {
 			},
 		},
 		talk_active: {
-			name: 'Talk Active',
-			description: 'True while talk is active, in either push or latch mode.',
+			name: 'Global Talk Active',
+			description: 'True while Global Talk is active, in either push or latch mode.',
 			type: 'boolean',
 			defaultStyle: { bgcolor: combineRgb(255, 152, 0), color: combineRgb(0, 0, 0) },
 			options: [],
@@ -219,12 +267,79 @@ export function UpdateFeedbacks(self: ModuleInstance): void {
 			},
 		},
 		talk_live: {
-			name: 'Talk Live',
+			name: 'Microphone Live',
 			description: 'True while CrewLAN reports the microphone as live on the device.',
 			type: 'boolean',
 			defaultStyle: { bgcolor: combineRgb(244, 67, 54), color: combineRgb(255, 255, 255) },
 			options: [],
 			callback: () => self.getCrewLanState().controls?.shoutbox.talk.live === true,
+		},
+		input_muted: {
+			name: 'Input Muted',
+			description: 'True while the Input, the microphone, is muted. Needs /api/v2.',
+			type: 'boolean',
+			defaultStyle: { bgcolor: combineRgb(244, 67, 54), color: combineRgb(255, 255, 255) },
+			options: [],
+			callback: () => self.getCrewLanState().intercom?.inputMuted === true,
+		},
+		group_talk_available: {
+			name: 'Group Talk Available',
+			description:
+				'True while the connection is ready, the participant is a member of the group, holds an audio connection and is not in a direct call. Needs /api/v2.',
+			type: 'boolean',
+			defaultStyle: { bgcolor: combineRgb(48, 167, 91), color: combineRgb(255, 255, 255) },
+			options: [groupOption(self)],
+			callback: (feedback) =>
+				intercomKeysAvailable(self) && intercomGroup(self, feedback.options.groupId) !== undefined,
+		},
+		group_talk_active: {
+			name: 'Group Talk Active',
+			description: "True while the participant's talk key for the group is held, push or latch. Needs /api/v2.",
+			type: 'boolean',
+			defaultStyle: { bgcolor: combineRgb(15, 207, 41), color: combineRgb(0, 0, 0) },
+			options: [groupOption(self)],
+			callback: (feedback) => intercomGroup(self, feedback.options.groupId)?.talkHeld === true,
+		},
+		group_muted: {
+			name: 'Group Muted',
+			description: 'True while the participant hears nothing of the group. Needs /api/v2.',
+			type: 'boolean',
+			defaultStyle: { bgcolor: combineRgb(244, 67, 54), color: combineRgb(255, 255, 255) },
+			options: [groupOption(self)],
+			callback: (feedback) => intercomGroup(self, feedback.options.groupId)?.muted === true,
+		},
+		call_ringing: {
+			name: 'Direct: Ringing',
+			description: 'True while somebody rings the participant for a direct call. Needs /api/v2.',
+			type: 'boolean',
+			defaultStyle: { bgcolor: combineRgb(255, 152, 0), color: combineRgb(0, 0, 0) },
+			options: [],
+			callback: () => (self.getCrewLanState().intercom?.ringing.length ?? 0) > 0,
+		},
+		call_active: {
+			name: 'Direct: In a Call',
+			description: 'True while the participant is in a direct call. Needs /api/v2.',
+			type: 'boolean',
+			defaultStyle: { bgcolor: combineRgb(15, 207, 41), color: combineRgb(0, 0, 0) },
+			options: [],
+			callback: () => (self.getCrewLanState().intercom?.call ?? null) !== null,
+		},
+		answer_available: {
+			name: 'Direct: Answer Available',
+			description:
+				'True while the connection is ready, the participant holds an audio connection and is not in a direct call. Needs /api/v2.',
+			type: 'boolean',
+			defaultStyle: { bgcolor: combineRgb(48, 167, 91), color: combineRgb(255, 255, 255) },
+			options: [],
+			callback: () => intercomKeysAvailable(self),
+		},
+		group_member: {
+			name: 'Group Member',
+			description: 'True while the connection is ready and the participant is a member of the group. Needs /api/v2.',
+			type: 'boolean',
+			defaultStyle: { bgcolor: combineRgb(48, 167, 91), color: combineRgb(255, 255, 255) },
+			options: [groupOption(self)],
+			callback: (feedback) => isConnectionReady(self) && intercomGroup(self, feedback.options.groupId) !== undefined,
 		},
 	})
 }

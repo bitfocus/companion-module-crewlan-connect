@@ -22,6 +22,10 @@ export type VariablesSchema = {
 	running_macro_labels: string
 	last_alert: string
 	last_error: string
+	api_version: string
+	input_muted: boolean
+	intercom_ringing_caller: string
+	intercom_call_partner: string
 }
 
 export function UpdateVariableDefinitions(self: ModuleInstance): void {
@@ -32,20 +36,24 @@ export function UpdateVariableDefinitions(self: ModuleInstance): void {
 		current_status_id: { name: 'Current status id' },
 		current_status_label: { name: 'Current status label' },
 		current_status_motion: { name: 'Current status motion preset' },
-		listen_enabled: { name: 'Listen channel enabled' },
-		listen_available: { name: 'Listen channel available' },
-		listen_muted: { name: 'Listen channel muted' },
-		talk_enabled: { name: 'Talk channel enabled' },
-		talk_available: { name: 'Talk channel available' },
-		talk_active: { name: 'Talk control active' },
-		talk_live: { name: 'Talk live state' },
-		talk_control_mode: { name: 'Talk control mode' },
+		listen_enabled: { name: 'Output enabled' },
+		listen_available: { name: 'Output available' },
+		listen_muted: { name: 'Output muted' },
+		talk_enabled: { name: 'Global Talk enabled' },
+		talk_available: { name: 'Global Talk available' },
+		talk_active: { name: 'Global Talk active' },
+		talk_live: { name: 'Microphone live' },
+		talk_control_mode: { name: 'Global Talk control mode' },
 		event_stream_connected: { name: 'Live event stream connected' },
 		macros_supported: { name: 'CrewLAN offers macros' },
 		running_macro_count: { name: 'Running macro count' },
 		running_macro_labels: { name: 'Running macro labels' },
 		last_alert: { name: 'Last alert' },
 		last_error: { name: 'Last error' },
+		api_version: { name: 'CrewLAN API spoken (v1 or v2)' },
+		input_muted: { name: 'Input muted' },
+		intercom_ringing_caller: { name: 'Direct: who rings first' },
+		intercom_call_partner: { name: 'Direct: who the call is with' },
 	})
 }
 
@@ -76,5 +84,9 @@ export function UpdateVariableValues(self: ModuleInstance): void {
 		running_macro_labels: runningMacros.map((macro) => macro.label).join(', '),
 		last_alert: state.lastAlert,
 		last_error: state.lastError,
+		api_version: state.api ?? '',
+		input_muted: state.intercom?.inputMuted === true,
+		intercom_ringing_caller: state.intercom?.ringing[0]?.name ?? '',
+		intercom_call_partner: state.intercom?.call?.name ?? '',
 	})
 }

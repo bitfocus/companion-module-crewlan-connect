@@ -59,7 +59,25 @@ describe('pickFresher', () => {
 
 describe('feedback groups', () => {
 	it('maps each state slice to its feedbacks', () => {
-		assert.deepEqual(feedbackIdsForGroups(new Set(['connection'])), ['connection_ok'])
+		// Only the readiness feedbacks read the connection; the state ones say what CrewLAN reports.
+		assert.deepEqual(feedbackIdsForGroups(new Set(['connection'])), [
+			'connection_ok',
+			'connection_ready',
+			'group_talk_available',
+			'answer_available',
+			'group_member',
+		])
+		// A feedback that reads several slices is re-checked when any of them changed.
+		assert.deepEqual(feedbackIdsForGroups(new Set(['intercom'])), [
+			'input_muted',
+			'group_talk_available',
+			'group_talk_active',
+			'group_muted',
+			'call_ringing',
+			'call_active',
+			'answer_available',
+			'group_member',
+		])
 		assert.deepEqual(feedbackIdsForGroups(new Set(['status'])), ['status_is', 'status_style'])
 		assert.equal(feedbackIdsForGroups(new Set(['controls'])).length, 9)
 		assert.deepEqual(feedbackIdsForGroups(new Set()), [])
