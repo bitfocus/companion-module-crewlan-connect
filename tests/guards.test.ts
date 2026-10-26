@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { isPublicMacroDto, isPublicMacroDtoList, isPublicMacroRemovedEventData } from '../src/guards.js'
+import {
+	isIntegrationIntercomControls,
+	isPublicMacroDto,
+	isPublicMacroDtoList,
+	isPublicMacroRemovedEventData,
+} from '../src/guards.js'
 
 function macro(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	return {
@@ -54,5 +59,34 @@ describe('macro guards', () => {
 	it('validates the removal payload', () => {
 		assert.equal(isPublicMacroRemovedEventData({ id: 'macro-1' }), true)
 		assert.equal(isPublicMacroRemovedEventData({}), false)
+	})
+})
+
+describe('intercom controls guard', () => {
+	const controls = {
+		inputMuted: false,
+		outputMuted: false,
+		globalTalk: { held: false, talkKey: null },
+		groupTalk: [],
+		audio: { connected: true, sending: false },
+	}
+	const call = { partnerId: 'ent-bob', direction: 'outgoing', state: 'active', talk: { held: true, talkKey: 'latch' } }
+	const withCall = (directCall: unknown): unknown => ({ ...controls, directCall })
+
+	it('accepts a direct call, none, and controls from a Workspace that predates it', () => {
+		assert.equal(isIntegrationIntercomControls(withCall(call)), true)
+		assert.equal(isIntegrationIntercomControls(withCall(null)), true)
+		assert.equal(isIntegrationIntercomControls(withCall({ ...call, talk: { held: false, talkKey: null } })), true)
+		assert.equal(isIntegrationIntercomControls(withCall({ ...call, talk: { held: false } })), true)
+		assert.equal(isIntegrationIntercomControls(withCall({ ...call, partnerTalks: true, reason: null })), true)
+		assert.equal(isIntegrationIntercomControls(controls), true)
+	})
+
+	it('rejects a direct call that is missing or misstates what the buttons depend on', () => {
+		assert.equal(isIntegrationIntercomControls(withCall({ ...call, direction: 'sideways' })), false)
+		assert.equal(isIntegrationIntercomControls(withCall({ ...call, state: 'held' })), false)
+		assert.equal(isIntegrationIntercomControls(withCall({ ...call, talk: { held: 'yes' } })), false)
+		assert.equal(isIntegrationIntercomControls(withCall({ ...call, talk: { held: true, talkKey: 'hold' } })), false)
+		assert.equal(isIntegrationIntercomControls(withCall({ direction: 'incoming', state: 'ringing' })), false)
 	})
 })

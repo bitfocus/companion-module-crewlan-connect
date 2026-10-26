@@ -1,5 +1,6 @@
 import type {
 	IntegrationDescription,
+	IntegrationDirectCall,
 	IntegrationEntityStatusView,
 	IntegrationEventEnvelope,
 	IntegrationGroupList,
@@ -190,8 +191,16 @@ function isTalkKey(value: unknown): value is 'push' | 'latch' {
 	return value === 'push' || value === 'latch'
 }
 
-function isCallerRef(value: unknown): value is { callerId: string } {
-	return isRecord(value) && isString(value.callerId)
+function isIntegrationDirectCall(value: unknown): value is IntegrationDirectCall {
+	return (
+		isRecord(value) &&
+		isString(value.partnerId) &&
+		(value.direction === 'incoming' || value.direction === 'outgoing') &&
+		(value.state === 'ringing' || value.state === 'active' || value.state === 'ended') &&
+		isRecord(value.talk) &&
+		isBoolean(value.talk.held) &&
+		(value.talk.talkKey === undefined || value.talk.talkKey === null || isTalkKey(value.talk.talkKey))
+	)
 }
 
 export function isIntegrationDescription(value: unknown): value is IntegrationDescription {
@@ -262,8 +271,7 @@ export function isIntegrationIntercomControls(value: unknown): value is Integrat
 			(entry): entry is { groupId: string; talkKey: 'push' | 'latch' } =>
 				isRecord(entry) && isString(entry.groupId) && isTalkKey(entry.talkKey),
 		) &&
-		(value.call === null || isCallerRef(value.call)) &&
-		isArrayOf(value.ringing, isCallerRef) &&
+		(value.directCall === undefined || value.directCall === null || isIntegrationDirectCall(value.directCall)) &&
 		isRecord(value.audio) &&
 		isBoolean(value.audio.connected) &&
 		isBoolean(value.audio.sending)

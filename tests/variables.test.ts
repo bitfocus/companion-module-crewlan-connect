@@ -35,25 +35,38 @@ function valuesFor(state: Partial<CrewLanState>): Record<string, unknown> {
 }
 
 describe('Companion intercom variables', () => {
-	it('names the API spoken, the Input mute, the first caller and the call partner over v2', () => {
-		const values = valuesFor({
-			api: 'v2',
-			intercom: {
-				groups: [],
-				inputMuted: true,
-				audioConnected: true,
-				ringing: [
-					{ id: 'ent-2', name: 'Anna' },
-					{ id: 'ent-3', name: 'Ben' },
-				],
-				call: { id: 'ent-4', name: 'Chris' },
-			},
-		})
+	it('names the API spoken, the Input mute, the caller and the call partner over v2', () => {
+		const intercom = {
+			groups: [],
+			inputMuted: true,
+			audioConnected: true,
+			ringing: { id: 'ent-2', name: 'Anna' },
+			calling: null,
+			call: null,
+			callTalkHeld: false,
+			callTalkKey: null,
+		}
+		const ringing = valuesFor({ api: 'v2', intercom })
 
-		assert.equal(values.api_version, 'v2')
-		assert.equal(values.input_muted, true)
-		assert.equal(values.intercom_ringing_caller, 'Anna')
-		assert.equal(values.intercom_call_partner, 'Chris')
+		assert.equal(ringing.api_version, 'v2')
+		assert.equal(ringing.input_muted, true)
+		assert.equal(ringing.intercom_ringing_caller, 'Anna')
+		assert.equal(ringing.intercom_call_partner, '')
+
+		const inCall = valuesFor({
+			api: 'v2',
+			intercom: { ...intercom, ringing: null, call: { id: 'ent-4', name: 'Chris' } },
+		})
+		assert.equal(inCall.intercom_ringing_caller, '')
+		assert.equal(inCall.intercom_call_partner, 'Chris')
+
+		// One's own call names its partner while it still rings, so Hang up shows whom it cancels.
+		const calling = valuesFor({
+			api: 'v2',
+			intercom: { ...intercom, ringing: null, calling: { id: 'ent-4', name: 'Chris' } },
+		})
+		assert.equal(calling.intercom_ringing_caller, '')
+		assert.equal(calling.intercom_call_partner, 'Chris')
 	})
 
 	it('is empty over v1 and before the first connect', () => {

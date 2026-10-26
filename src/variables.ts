@@ -52,8 +52,8 @@ export function UpdateVariableDefinitions(self: ModuleInstance): void {
 		last_error: { name: 'Last error' },
 		api_version: { name: 'CrewLAN API spoken (v1 or v2)' },
 		input_muted: { name: 'Input muted' },
-		intercom_ringing_caller: { name: 'Direct: who rings first' },
-		intercom_call_partner: { name: 'Direct: who the call is with' },
+		intercom_ringing_caller: { name: 'Direct: who rings' },
+		intercom_call_partner: { name: 'Direct: who the call is with, or whom your own call rings' },
 	})
 }
 
@@ -86,7 +86,7 @@ export function UpdateVariableValues(self: ModuleInstance): void {
 		last_error: state.lastError,
 		api_version: state.api ?? '',
 		input_muted: state.intercom?.inputMuted === true,
-		intercom_ringing_caller: state.intercom?.ringing[0]?.name ?? '',
-		intercom_call_partner: state.intercom?.call?.name ?? '',
+		intercom_ringing_caller: state.intercom?.ringing?.name ?? '',
+		intercom_call_partner: state.intercom?.call?.name ?? state.intercom?.calling?.name ?? '',
 	})
 }

@@ -29,7 +29,11 @@ const offline: PublicStatusDto = {
 	selectable: false,
 }
 
-/** A connection with every state lit: the status chosen, the macro running, every mute on, a call. */
+/**
+ * A connection with every state lit: the status chosen, the macro running, every mute on, somebody
+ * ringing and a call active with its Talk held — the last two at once, which CrewLAN never reports,
+ * so that every Direct key is lit.
+ */
 function litState(api: CrewLanApiVersion): CrewLanState {
 	return {
 		connected: true,
@@ -81,8 +85,11 @@ function litState(api: CrewLanApiVersion): CrewLanState {
 						],
 						inputMuted: true,
 						audioConnected: true,
-						ringing: [{ id: 'ent-2', name: 'Anna' }],
-						call: null,
+						ringing: { id: 'ent-2', name: 'Anna' },
+						calling: null,
+						call: { id: 'ent-3', name: 'Ben' },
+						callTalkHeld: true,
+						callTalkKey: 'latch',
 					},
 	}
 }
@@ -172,6 +179,8 @@ const v2Presets = [
 	...groupPresets('everyone'),
 	...groupPresets(crewGroupId),
 	'call_answer',
+	'call_talk_push',
+	'call_talk_latch',
 	'call_hang_up',
 ]
 
@@ -229,15 +238,39 @@ describe('the final look over v2 in the intercom', () => {
 		}
 	})
 
-	it('greys Answer while a call is up, even while somebody rings', () => {
+	it('lights Answer while somebody rings, the Direct Talk keys during an active call, Hang up for either call', () => {
 		const state = litState('v2')
 		const built = harness(state)
 		assert.ok(state.intercom)
-		state.intercom.call = { id: 'ent-3', name: 'Ben' }
-		const final = looks(built)
+		const direct = (): unknown[] => {
+			const final = looks(built)
 
-		assert.equal(isGrey(final.call_answer), true)
-		assert.equal(isGrey(final.call_hang_up), false)
+			return ['call_answer', 'call_talk_push', 'call_talk_latch', 'call_hang_up'].map((id) =>
+				isGrey(final[id]) ? 'grey' : final[id]?.bgcolor,
+			)
+		}
+
+		state.intercom.call = null
+		state.intercom.callTalkHeld = false
+		state.intercom.callTalkKey = null
+		assert.deepEqual(direct(), [0xff9800, 'grey', 'grey', 0x4a4a4a])
+
+		state.intercom.ringing = null
+		state.intercom.calling = { id: 'ent-2', name: 'Anna' }
+		assert.deepEqual(direct(), ['grey', 'grey', 'grey', 0xff9800])
+
+		state.intercom.calling = null
+		state.intercom.call = { id: 'ent-2', name: 'Anna' }
+		assert.deepEqual(direct(), ['grey', 0x3a7542, 0x3a7542, 0x0fcf29])
+
+		state.intercom.callTalkHeld = true
+		state.intercom.callTalkKey = 'push'
+		assert.deepEqual(direct(), ['grey', 0x0fcf29, 0x0fcf29, 0x0fcf29])
+
+		state.intercom.call = null
+		state.intercom.callTalkHeld = false
+		state.intercom.callTalkKey = null
+		assert.deepEqual(direct(), ['grey', 'grey', 'grey', 0x4a4a4a])
 	})
 
 	it('greys the talk keys and Answer without an audio connection', () => {
@@ -252,6 +285,8 @@ describe('the final look over v2 in the intercom', () => {
 			'talk_push',
 			'talk_latch_toggle',
 			'call_answer',
+			'call_talk_push',
+			'call_talk_latch',
 			`group_everyone_talk_push`,
 			`group_everyone_talk_latch`,
 		]) {

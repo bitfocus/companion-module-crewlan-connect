@@ -25,8 +25,11 @@ export type FeedbacksSchema = {
 	group_talk_active: { type: 'boolean'; options: { groupId: string } }
 	group_muted: { type: 'boolean'; options: { groupId: string } }
 	call_ringing: { type: 'boolean'; options: Record<string, never> }
+	call_calling: { type: 'boolean'; options: Record<string, never> }
 	call_active: { type: 'boolean'; options: Record<string, never> }
 	answer_available: { type: 'boolean'; options: Record<string, never> }
+	call_talk_available: { type: 'boolean'; options: Record<string, never> }
+	call_talk_active: { type: 'boolean'; options: Record<string, never> }
 	group_member: { type: 'boolean'; options: { groupId: string } }
 }
 
@@ -54,11 +57,9 @@ function intercomGroup(self: ModuleInstance, groupId: string | undefined) {
 	return self.getCrewLanState().intercom?.groups.find((group) => group.id === groupId)
 }
 
-/** Whether a talk key or *Answer* can be pressed: ready, with an audio connection and not in a call. */
+/** What a talk key and *Answer* need: ready, with an audio connection. A direct call takes no talk key away. */
 function intercomKeysAvailable(self: ModuleInstance): boolean {
-	const intercom = self.getCrewLanState().intercom
-
-	return isConnectionReady(self) && intercom?.audioConnected === true && intercom.call === null
+	return isConnectionReady(self) && self.getCrewLanState().intercom?.audioConnected === true
 }
 
 export function UpdateFeedbacks(self: ModuleInstance): void {
@@ -177,8 +178,7 @@ export function UpdateFeedbacks(self: ModuleInstance): void {
 		},
 		talk_available: {
 			name: 'Global Talk Available',
-			description:
-				'True when Global Talk can be pressed: the participant holds an audio connection and is not in a direct call.',
+			description: 'True when Global Talk can be pressed: the participant holds an audio connection.',
 			type: 'boolean',
 			defaultStyle: { bgcolor: combineRgb(48, 167, 91), color: combineRgb(255, 255, 255) },
 			options: [],
@@ -285,7 +285,7 @@ export function UpdateFeedbacks(self: ModuleInstance): void {
 		group_talk_available: {
 			name: 'Group Talk Available',
 			description:
-				'True while the connection is ready, the participant is a member of the group, holds an audio connection and is not in a direct call. Needs /api/v2.',
+				'True while the connection is ready, the participant is a member of the group and holds an audio connection. Needs /api/v2.',
 			type: 'boolean',
 			defaultStyle: { bgcolor: combineRgb(48, 167, 91), color: combineRgb(255, 255, 255) },
 			options: [groupOption(self)],
@@ -310,15 +310,23 @@ export function UpdateFeedbacks(self: ModuleInstance): void {
 		},
 		call_ringing: {
 			name: 'Direct: Ringing',
-			description: 'True while somebody rings the participant for a direct call. Needs /api/v2.',
+			description: 'True while somebody rings the participant for a direct call not yet answered. Needs /api/v2.',
 			type: 'boolean',
 			defaultStyle: { bgcolor: combineRgb(255, 152, 0), color: combineRgb(0, 0, 0) },
 			options: [],
-			callback: () => (self.getCrewLanState().intercom?.ringing.length ?? 0) > 0,
+			callback: () => (self.getCrewLanState().intercom?.ringing ?? null) !== null,
+		},
+		call_calling: {
+			name: 'Direct: Calling',
+			description: "True while the participant's own direct call rings its partner, not yet answered. Needs /api/v2.",
+			type: 'boolean',
+			defaultStyle: { bgcolor: combineRgb(255, 152, 0), color: combineRgb(0, 0, 0) },
+			options: [],
+			callback: () => (self.getCrewLanState().intercom?.calling ?? null) !== null,
 		},
 		call_active: {
 			name: 'Direct: In a Call',
-			description: 'True while the participant is in a direct call. Needs /api/v2.',
+			description: 'True while the participant is in an active direct call, whoever called. Needs /api/v2.',
 			type: 'boolean',
 			defaultStyle: { bgcolor: combineRgb(15, 207, 41), color: combineRgb(0, 0, 0) },
 			options: [],
@@ -327,11 +335,28 @@ export function UpdateFeedbacks(self: ModuleInstance): void {
 		answer_available: {
 			name: 'Direct: Answer Available',
 			description:
-				'True while the connection is ready, the participant holds an audio connection and is not in a direct call. Needs /api/v2.',
+				'True while the connection is ready, the participant holds an audio connection and somebody rings them for a direct call. Needs /api/v2.',
 			type: 'boolean',
 			defaultStyle: { bgcolor: combineRgb(48, 167, 91), color: combineRgb(255, 255, 255) },
 			options: [],
-			callback: () => intercomKeysAvailable(self),
+			callback: () => intercomKeysAvailable(self) && (self.getCrewLanState().intercom?.ringing ?? null) !== null,
+		},
+		call_talk_available: {
+			name: 'Direct: Talk Available',
+			description:
+				'True while the connection is ready, the participant holds an audio connection and is in an active direct call. Needs /api/v2.',
+			type: 'boolean',
+			defaultStyle: { bgcolor: combineRgb(48, 167, 91), color: combineRgb(255, 255, 255) },
+			options: [],
+			callback: () => intercomKeysAvailable(self) && (self.getCrewLanState().intercom?.call ?? null) !== null,
+		},
+		call_talk_active: {
+			name: 'Direct: Talk Active',
+			description: "True while the participant's talk key for the direct call is held, push or latch. Needs /api/v2.",
+			type: 'boolean',
+			defaultStyle: { bgcolor: combineRgb(15, 207, 41), color: combineRgb(0, 0, 0) },
+			options: [],
+			callback: () => self.getCrewLanState().intercom?.callTalkHeld === true,
 		},
 		group_member: {
 			name: 'Group Member',

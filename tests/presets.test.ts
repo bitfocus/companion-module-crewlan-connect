@@ -166,8 +166,11 @@ function createIntercom(groups: { id: string; name: string }[]): CrewLanState['i
 		})),
 		inputMuted: false,
 		audioConnected: true,
-		ringing: [],
+		ringing: null,
+		calling: null,
 		call: null,
+		callTalkHeld: false,
+		callTalkKey: null,
 	}
 }
 
@@ -234,7 +237,7 @@ describe('Companion intercom presets', () => {
 			['talk_push', 'talk_latch_toggle', 'listen_mute_toggle', 'input_mute_toggle'],
 			['group_everyone_talk_push', 'group_everyone_talk_latch', 'group_everyone_mute'],
 			[`group_${crewGroupId}_talk_push`, `group_${crewGroupId}_talk_latch`, `group_${crewGroupId}_mute`],
-			['call_answer', 'call_hang_up'],
+			['call_answer', 'call_talk_push', 'call_talk_latch', 'call_hang_up'],
 		])
 
 		const section = structure.find((candidate) => candidate.id === 'intercom')
@@ -262,6 +265,18 @@ describe('Companion intercom presets', () => {
 
 		assert.equal(presets.call_answer?.style.text, 'Answer\n$(crewlan:intercom_ringing_caller)')
 		assert.equal(presets.call_hang_up?.style.text, 'Hang up\n$(crewlan:intercom_call_partner)')
+		assert.deepEqual(presets.call_hang_up?.steps[0]?.down, [{ actionId: 'call_hang_up', options: {} }])
+
+		assert.equal(presets.call_talk_push?.name, 'Direct: Talk (push)')
+		assert.equal(presets.call_talk_push?.style.text, 'Talk Push\n$(crewlan:intercom_call_partner)')
+		assert.deepEqual(presets.call_talk_push?.steps[0]?.down, [{ actionId: 'call_talk_push_down', options: {} }])
+		assert.deepEqual(presets.call_talk_push?.steps[0]?.up, [{ actionId: 'call_talk_push_up', options: {} }])
+		assert.equal(presets.call_talk_latch?.name, 'Direct: Talk (latch)')
+		assert.equal(presets.call_talk_latch?.style.text, 'Talk Latch\n$(crewlan:intercom_call_partner)')
+		assert.deepEqual(presets.call_talk_latch?.steps[0]?.down, [
+			{ actionId: 'call_talk_latch', options: { mode: 'toggle' } },
+		])
+		assert.deepEqual(presets.call_talk_latch?.steps[0]?.up, [])
 	})
 
 	it('drops a group left or removed and shows a rename at the next rebuild', () => {
@@ -318,20 +333,25 @@ describe('Companion intercom presets', () => {
 			group_everyone_talk_latch: 'group_talk_available',
 			group_everyone_mute: 'group_member',
 			call_answer: 'answer_available',
+			call_talk_push: 'call_talk_available',
+			call_talk_latch: 'call_talk_available',
 			call_hang_up: 'connection_ready',
 			dismiss_alerts: 'connection_ready',
 		}
-		const expectedState: Record<string, string | undefined> = {
-			talk_push: 'talk_push_active',
-			talk_latch_toggle: 'talk_latch_active',
-			listen_mute_toggle: 'listen_muted',
-			input_mute_toggle: 'input_muted',
-			group_everyone_talk_push: 'group_talk_active',
-			group_everyone_talk_latch: 'group_talk_active',
-			group_everyone_mute: 'group_muted',
-			call_answer: 'call_ringing',
-			call_hang_up: 'call_active',
-			dismiss_alerts: undefined,
+		const expectedStates: Record<string, string[]> = {
+			talk_push: ['talk_push_active'],
+			talk_latch_toggle: ['talk_latch_active'],
+			listen_mute_toggle: ['listen_muted'],
+			input_mute_toggle: ['input_muted'],
+			group_everyone_talk_push: ['group_talk_active'],
+			group_everyone_talk_latch: ['group_talk_active'],
+			group_everyone_mute: ['group_muted'],
+			call_answer: ['call_ringing'],
+			call_talk_push: ['call_talk_active'],
+			call_talk_latch: ['call_talk_active'],
+			// Lit while there is something to hang up: the participant's own call ringing, or the active call.
+			call_hang_up: ['call_calling', 'call_active'],
+			dismiss_alerts: [],
 		}
 
 		assert.deepEqual(Object.keys(presets).sort(), Object.keys(expectedFirst).sort())
@@ -353,7 +373,7 @@ describe('Companion intercom presets', () => {
 			assert.notEqual(first?.style?.bgcolor, offlineBackgroundColor, id)
 			assert.deepEqual(
 				states.map((feedback) => feedback.feedbackId),
-				expectedState[id] === undefined ? [] : [expectedState[id]],
+				expectedStates[id],
 				id,
 			)
 			assert.deepEqual(

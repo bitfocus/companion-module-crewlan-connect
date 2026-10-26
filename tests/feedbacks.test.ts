@@ -17,8 +17,11 @@ function createIntercom(input: Partial<IntercomState> = {}): IntercomState {
 		],
 		inputMuted: true,
 		audioConnected: true,
-		ringing: [],
+		ringing: null,
+		calling: null,
 		call: null,
+		callTalkHeld: false,
+		callTalkKey: null,
 		...input,
 	}
 }
@@ -87,7 +90,7 @@ describe('Companion intercom feedbacks', () => {
 		assert.equal(value(createState({ ownerPresent: false }), 'connection_ready'), false)
 	})
 
-	it('offers a group talk key only for a member group, with audio and not in a call', () => {
+	it('offers a group talk key only for a member group with audio, in a direct call too', () => {
 		assert.equal(value(createState(), 'group_talk_available', { groupId: crewGroupId }), true)
 		assert.equal(
 			value(createState(), 'group_talk_available', { groupId: 'grp-ffffffffffffffffffffffffffffffff' }),
@@ -107,7 +110,7 @@ describe('Companion intercom feedbacks', () => {
 					groupId: 'everyone',
 				},
 			),
-			false,
+			true,
 		)
 		assert.equal(value(createState({ ownerPresent: false }), 'group_talk_available', { groupId: 'everyone' }), false)
 		assert.equal(value(createState({ intercom: null }), 'group_talk_available', { groupId: 'everyone' }), false)
@@ -120,25 +123,74 @@ describe('Companion intercom feedbacks', () => {
 		assert.equal(value(createState(), 'group_muted', { groupId: 'everyone' }), false)
 	})
 
-	it('reads the Input mute, who rings and the current call', () => {
+	it('reads the Input mute, who rings, whom one calls and the active call', () => {
+		const callFeedbacks = ['call_ringing', 'call_calling', 'call_active', 'answer_available', 'call_talk_available']
+		const read = (state: CrewLanState): Record<string, unknown> =>
+			Object.fromEntries(callFeedbacks.map((feedbackId) => [feedbackId, value(state, feedbackId)]))
+
 		assert.equal(value(createState(), 'input_muted'), true)
-		assert.equal(value(createState(), 'call_ringing'), false)
-		assert.equal(value(createState(), 'call_active'), false)
+		assert.deepEqual(read(createState()), {
+			call_ringing: false,
+			call_calling: false,
+			call_active: false,
+			answer_available: false,
+			call_talk_available: false,
+		})
+		assert.deepEqual(read(createState({ intercom: createIntercom({ ringing: { id: 'ent-2', name: 'Anna' } }) })), {
+			call_ringing: true,
+			call_calling: false,
+			call_active: false,
+			answer_available: true,
+			call_talk_available: false,
+		})
+		assert.deepEqual(read(createState({ intercom: createIntercom({ calling: { id: 'ent-2', name: 'Anna' } }) })), {
+			call_ringing: false,
+			call_calling: true,
+			call_active: false,
+			answer_available: false,
+			call_talk_available: false,
+		})
+		assert.deepEqual(read(createState({ intercom: createIntercom({ call: { id: 'ent-2', name: 'Anna' } }) })), {
+			call_ringing: false,
+			call_calling: false,
+			call_active: true,
+			answer_available: false,
+			call_talk_available: true,
+		})
+	})
 
-		const ringing = createState({ intercom: createIntercom({ ringing: [{ id: 'ent-2', name: 'Anna' }] }) })
-		assert.equal(value(ringing, 'call_ringing'), true)
-		assert.equal(value(ringing, 'answer_available'), true)
+	it("reads the call's Talk key, and offers it only during an active call with audio", () => {
+		const inCall = { call: { id: 'ent-2', name: 'Anna' } }
 
-		const inCall = createState({ intercom: createIntercom({ call: { id: 'ent-2', name: 'Anna' } }) })
-		assert.equal(value(inCall, 'call_active'), true)
-		assert.equal(value(inCall, 'answer_available'), false)
-		assert.equal(value(createState({ intercom: createIntercom({ audioConnected: false }) }), 'answer_available'), false)
+		assert.equal(value(createState(), 'call_talk_active'), false)
+		assert.equal(
+			value(
+				createState({ intercom: createIntercom({ ...inCall, callTalkHeld: true, callTalkKey: 'push' }) }),
+				'call_talk_active',
+			),
+			true,
+		)
+		assert.equal(
+			value(createState({ intercom: createIntercom({ ...inCall, audioConnected: false }) }), 'call_talk_available'),
+			false,
+		)
+		assert.equal(
+			value(createState({ ownerPresent: false, intercom: createIntercom(inCall) }), 'call_talk_available'),
+			false,
+		)
+		assert.equal(value(createState({ intercom: null }), 'call_talk_available'), false)
 	})
 
 	it('keeps the state feedbacks on what CrewLAN reports while the owner is absent', () => {
 		const waiting = createState({
 			ownerPresent: false,
-			intercom: createIntercom({ ringing: [{ id: 'ent-2', name: 'Anna' }], call: { id: 'ent-3', name: 'Ben' } }),
+			intercom: createIntercom({
+				ringing: { id: 'ent-2', name: 'Anna' },
+				calling: { id: 'ent-2', name: 'Anna' },
+				call: { id: 'ent-3', name: 'Ben' },
+				callTalkHeld: true,
+				callTalkKey: 'latch',
+			}),
 		})
 
 		// A 1.x button and its $(crewlan:…) variable agree; the preset greys by its last feedback.
@@ -148,7 +200,9 @@ describe('Companion intercom feedbacks', () => {
 			'talk_push_active',
 			'input_muted',
 			'call_ringing',
+			'call_calling',
 			'call_active',
+			'call_talk_active',
 		]) {
 			assert.equal(value(waiting, feedbackId), true, feedbackId)
 		}
@@ -156,7 +210,7 @@ describe('Companion intercom feedbacks', () => {
 		assert.equal(value(waiting, 'group_muted', { groupId: crewGroupId }), true)
 		assert.equal(value(waiting, 'group_talk_active', { groupId: crewGroupId }), true)
 
-		for (const feedbackId of ['connection_ready', 'answer_available']) {
+		for (const feedbackId of ['connection_ready', 'answer_available', 'call_talk_available']) {
 			assert.equal(value(waiting, feedbackId), false, feedbackId)
 		}
 

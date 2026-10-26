@@ -49,8 +49,7 @@ async function startFake(): Promise<Fake> {
 			outputMuted: false,
 			globalTalk: { held: false, talkKey: null },
 			groupTalk: [],
-			call: null,
-			ringing: [{ callerId: 'ent-bob' }],
+			directCall: { partnerId: 'ent-bob', direction: 'incoming', state: 'ringing', talk: { held: false } },
 			audio: { connected: true, sending: false },
 			changedAt: '2026-10-25T20:00:00.000Z',
 		},
@@ -328,7 +327,7 @@ describe('module against a Workspace serving /api/v2', () => {
 				['grp-stage', 'Stage'],
 			],
 		)
-		assert.deepEqual(state.intercom?.ringing, [{ id: 'ent-bob', name: 'Bob' }])
+		assert.deepEqual(state.intercom?.ringing, { id: 'ent-bob', name: 'Bob' })
 		assert.deepEqual(
 			state.macros.map((macro) => [macro.id, macro.runnable, macro.colors.foregroundColor]),
 			[['mac-1', true, '#ffffff']],
@@ -337,7 +336,7 @@ describe('module against a Workspace serving /api/v2', () => {
 		assert.ok(fake.requests.some((request) => request.path.startsWith('/api/v2/events?types=')))
 	})
 
-	it('writes status, Output, Global Talk, Input, a group, a call and alerts as v2 requests', async () => {
+	it('writes status, Output, Global Talk, Input, a group, a call, its Talk and alerts as v2 requests', async () => {
 		await host.instance.setCrewLanStatus('sys-yellow')
 		await host.instance.setListenMuteMode('on')
 		await host.instance.setTalkState(true, 'push')
@@ -347,6 +346,9 @@ describe('module against a Workspace serving /api/v2', () => {
 		await host.instance.setGroupTalk('grp-stage', false, 'latch')
 		await host.instance.setGroupMuteMode('grp-stage', 'on')
 		await host.instance.answerCall()
+		await host.instance.setCallTalk(true, 'push')
+		await host.instance.setCallTalk(false, 'push')
+		await host.instance.setCallTalkLatchMode('on')
 		await host.instance.hangUpCall()
 
 		assert.deepEqual(bodies('status.command.setEntityStatus'), [{ entityId: 'ent-1', statusId: 'attention' }])
@@ -358,24 +360,32 @@ describe('module against a Workspace serving /api/v2', () => {
 			{ groupTalk: { groupId: 'grp-stage', held: true, talkKey: 'latch' } },
 			{ groupTalk: { groupId: 'grp-stage', held: false } },
 			{ call: { callerId: 'ent-bob' } },
+			{ callTalk: { held: true, talkKey: 'push' } },
+			{ callTalk: { held: false } },
+			{ callTalk: { held: true, talkKey: 'latch' } },
 			{ call: null },
 		])
 		assert.deepEqual(bodies('intercom.command.setListening'), [{ groupId: 'grp-stage', muted: true }])
 		assert.equal(host.instance.getCrewLanState().status?.status.id, 'sys-yellow')
 	})
 
-	it('logs a refused group write with its reason and keeps the connection', async () => {
+	it('logs a refused call or group write with its reason and keeps the connection', async () => {
 		fake.refuse.set('intercom.command.setControls', {
 			status: 409,
-			error: 'intercom_in_call',
-			message: 'Talk is not available during a direct call.',
+			error: 'intercom_no_call',
+			message: 'There is no active call to talk in.',
 		})
-		await host.instance.runCrewLanAction('Group Talk', async () =>
-			host.instance.setGroupTalk('grp-stage', true, 'push'),
-		)
+		await host.instance.runCrewLanAction('Direct Talk Push Down', async () => host.instance.setCallTalk(true, 'push'))
+		fake.refuse.set('intercom.command.setControls', {
+			status: 409,
+			error: 'intercom_not_ringing',
+			message: 'Nobody rings you from there.',
+		})
+		await host.instance.runCrewLanAction('Answer', async () => host.instance.answerCall())
 		fake.refuse.delete('intercom.command.setControls')
 
-		assert.ok(host.logs.some((line) => line === 'error: Group Talk: Talk is not available during a direct call.'))
+		assert.ok(host.logs.includes('error: Direct Talk Push Down: There is no active call to talk in.'))
+		assert.ok(host.logs.includes('error: Answer: Nobody rings you from there.'))
 		await host.instance.runCrewLanAction('Group Talk', async () => host.instance.setGroupTalk('grp-gone', true, 'push'))
 		assert.ok(
 			host.logs.some((line) => line.startsWith('error: Talk: you are not a member of the intercom group "grp-gone"')),
@@ -486,8 +496,7 @@ describe('module against a Workspace serving /api/v2', () => {
 		const before = snapshots()
 		fake.controls = {
 			...fake.controls,
-			ringing: [{ callerId: 'ent-carol' }],
-			call: null,
+			directCall: { partnerId: 'ent-carol', direction: 'incoming', state: 'ringing', talk: { held: false } },
 			changedAt: new Date().toISOString(),
 		}
 
@@ -495,7 +504,11 @@ describe('module against a Workspace serving /api/v2', () => {
 		// Two more controls reads name nobody new, so the snapshot is not read again.
 		await sleep(2200)
 		assert.equal(snapshots(), before + 1)
-		fake.controls = { ...fake.controls, ringing: [{ callerId: 'ent-bob' }], changedAt: new Date().toISOString() }
+		fake.controls = {
+			...fake.controls,
+			directCall: { partnerId: 'ent-bob', direction: 'incoming', state: 'ringing', talk: { held: false } },
+			changedAt: new Date().toISOString(),
+		}
 	})
 
 	it('toggles a group mute from a fresh read of the groups, which no event announces', async () => {
@@ -598,23 +611,40 @@ describe('module against a Workspace serving /api/v2', () => {
 		await waitFor(() => !host.instance.isMacroRunning('mac-1'), 'the macro to end')
 	})
 
-	it('reads the controls again on controlsChanged, ringing included', async () => {
-		fake.controls = { ...fake.controls, ringing: [], call: { callerId: 'ent-bob' } }
-		fake.event('intercom.event.controlsChanged', { entityId: 'ent-1', cause: 'ringing' })
+	it('reads the controls again on controlsChanged, a call included, and keeps Global Talk available in it', async () => {
+		fake.controls = {
+			...fake.controls,
+			directCall: {
+				partnerId: 'ent-bob',
+				direction: 'outgoing',
+				state: 'active',
+				talk: { held: true, talkKey: 'latch' },
+			},
+		}
+		fake.event('intercom.event.controlsChanged', { entityId: 'ent-1', cause: 'call' })
 		await waitFor(() => host.instance.getCrewLanState().intercom?.call?.name === 'Bob', 'the call to be up')
-		assert.equal(host.instance.getCrewLanState().controls?.shoutbox.talk.available, false)
+		assert.equal(host.instance.getCrewLanState().intercom?.callTalkKey, 'latch')
+		assert.equal(host.instance.getCrewLanState().controls?.shoutbox.talk.available, true)
+
+		// The latch toggles from the Talk the call holds: held, so it lets go.
+		await host.instance.setCallTalkLatchMode('toggle')
+		assert.deepEqual(bodies('intercom.command.setControls').at(-1), { callTalk: { held: false } })
 	})
 
-	it('answers nothing while a call is up, even while somebody rings', async () => {
-		fake.controls = { ...fake.controls, ringing: [{ callerId: 'ent-bob' }], call: { callerId: 'ent-bob' } }
-		fake.event('intercom.event.controlsChanged', { entityId: 'ent-1', cause: 'ringing' })
-		await waitFor(() => host.instance.getCrewLanState().intercom?.ringing.length === 1, 'somebody to ring')
+	it('answers nothing while nobody rings, an active call included', async () => {
+		fake.controls = {
+			...fake.controls,
+			directCall: { partnerId: 'ent-bob', direction: 'incoming', state: 'active', talk: { held: false } },
+		}
+		fake.event('intercom.event.controlsChanged', { entityId: 'ent-1', cause: 'call' })
+		await waitFor(() => host.instance.getCrewLanState().intercom?.call?.name === 'Bob', 'an active call')
+		assert.equal(host.instance.getCrewLanState().intercom?.ringing, null)
 		const before = bodies('intercom.command.setControls').length
 
 		await host.instance.answerCall()
 
 		assert.equal(bodies('intercom.command.setControls').length, before)
-		assert.ok(host.logs.includes('warn: Answer: you are already in a call; hang it up first.'))
+		assert.ok(host.logs.includes('info: Answer: nobody is calling.'))
 	})
 
 	it('drops a group the participant left and registers the presets again', async () => {
@@ -651,7 +681,7 @@ describe('module against a Workspace serving /api/v2', () => {
 
 describe('module against a Public API v1 switched off', () => {
 	const sentence =
-		'the v1 compatibility mode is off in this Workspace: an administrator switches it on in Administration, under Connections'
+		'the v1 compatibility mode is off in this Workspace: an administrator switches it on in Administration, under Integrations'
 	let server: http.Server
 	let host: Host
 

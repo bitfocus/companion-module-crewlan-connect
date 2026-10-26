@@ -191,8 +191,7 @@ export function toPublicControls(entityId: string, controls: IntegrationIntercom
 				active: controls.globalTalk.held,
 				live: controls.audio.sending,
 				controlMode: controls.globalTalk.held ? controls.globalTalk.talkKey : null,
-				// No talk key can be held in a direct call.
-				available: controls.audio.connected && controls.call === null,
+				available: controls.audio.connected,
 			},
 		},
 		updatedAt: controls.changedAt ?? null,
@@ -206,8 +205,15 @@ export function toIntercomState(
 	controls: IntegrationIntercomControls,
 	participants: ReadonlyMap<string, string>,
 ): IntercomState {
-	const caller = (id: string): { id: string; name: string } => ({ id, name: participants.get(id) ?? id })
 	const member = groups.filter((group) => group.everyone || group.members.includes(entityId))
+	const directCall = controls.directCall ?? null
+	const partner =
+		directCall === null
+			? null
+			: { id: directCall.partnerId, name: participants.get(directCall.partnerId) ?? directCall.partnerId }
+	// The call's Talk is held only while the call is active; an ended call is no call here.
+	const active = directCall?.state === 'active'
+	const callTalkHeld = active && directCall.talk.held
 
 	return {
 		groups: [...member.filter((group) => group.everyone), ...member.filter((group) => !group.everyone)].map((group) => {
@@ -225,8 +231,11 @@ export function toIntercomState(
 		}),
 		inputMuted: controls.inputMuted,
 		audioConnected: controls.audio.connected,
-		ringing: controls.ringing.map((ring) => caller(ring.callerId)),
-		call: controls.call === null ? null : caller(controls.call.callerId),
+		ringing: directCall?.state === 'ringing' && directCall.direction === 'incoming' ? partner : null,
+		calling: directCall?.state === 'ringing' && directCall.direction === 'outgoing' ? partner : null,
+		call: active ? partner : null,
+		callTalkHeld,
+		callTalkKey: callTalkHeld ? (directCall.talk.talkKey ?? null) : null,
 	}
 }
 
@@ -296,6 +305,7 @@ export interface IntegrationControlsBody {
 	globalTalk?: boolean
 	talkKey?: 'push' | 'latch'
 	groupTalk?: { groupId: string; held: boolean; talkKey?: 'push' | 'latch' }
+	callTalk?: { held: boolean; talkKey?: 'push' | 'latch' }
 	call?: { callerId: string } | null
 }
 
@@ -359,13 +369,11 @@ export class CrewLanV2Client {
 		}
 	}
 
-	/** The ids who ring or are in the call by the last controls read whose names the snapshot did not hold. */
+	/** The partner of the last controls read's direct call, when the snapshot did not hold their name. */
 	unnamedCallers(): string[] {
-		const ids = [...(this.controls?.ringing ?? []), ...(this.controls?.call ? [this.controls.call] : [])].map(
-			(caller) => caller.callerId,
-		)
+		const partnerId = this.controls?.directCall?.partnerId
 
-		return ids.filter((id) => !this.participants.has(id))
+		return partnerId === undefined || this.participants.has(partnerId) ? [] : [partnerId]
 	}
 
 	/** Reads the snapshot again for the participants' names alone: a participant created after it. */

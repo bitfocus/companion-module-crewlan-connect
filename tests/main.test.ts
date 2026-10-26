@@ -65,6 +65,7 @@ describe('feedback groups', () => {
 			'connection_ready',
 			'group_talk_available',
 			'answer_available',
+			'call_talk_available',
 			'group_member',
 		])
 		// A feedback that reads several slices is re-checked when any of them changed.
@@ -74,8 +75,11 @@ describe('feedback groups', () => {
 			'group_talk_active',
 			'group_muted',
 			'call_ringing',
+			'call_calling',
 			'call_active',
 			'answer_available',
+			'call_talk_available',
+			'call_talk_active',
 			'group_member',
 		])
 		assert.deepEqual(feedbackIdsForGroups(new Set(['status'])), ['status_is', 'status_style'])

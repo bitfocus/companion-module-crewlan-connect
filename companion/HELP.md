@@ -2,8 +2,8 @@
 
 This module connects Companion to one CrewLAN entity through a CrewLAN Connect token. It can set
 that entity's status, dismiss its alerts, run the workspace macros, and drive its Intercom: Global
-Talk, the Output and Input mutes, a Talk and a Mute for every group the entity is in, and answering
-and hanging up a direct call.
+Talk, the Output and Input mutes, a Talk and a Mute for every group the entity is in, and
+answering, talking in and hanging up a direct call.
 
 Audio stays in CrewLAN. Companion only controls the Intercom of the entity the token belongs to; it
 sends and receives no audio of its own.
@@ -16,7 +16,8 @@ Public API v1 otherwise. It asks `/api/v2` first on every connect, so nothing ha
 
 Over the Public API v1 — a CrewLAN v1 workspace — the connection keeps statuses, macros, alerts and
 the one Global Talk and Output. Input, the groups and direct calls need a workspace that serves
-`/api/v2`; over v1 their actions change nothing and say so in the connection's log.
+`/api/v2`; over v1 their actions change nothing and say so in the connection's log. The _Direct_
+buttons need a CrewLAN whose `/api/v2` reports the direct call; an earlier one shows no call.
 
 ## Setup
 
@@ -55,13 +56,14 @@ stream's resync after the entity returns included, an accepted press, an audio c
 entity (seen within about a second) or a later status change; over the Public API v1 at an
 accepted press or a later status change. Companion's preset list shows each button in its own
 look. A Talk or Answer button is greyed the same way while it cannot work: while no CrewLAN Client
-of the entity has its audio open, or during a direct call. A group's
-buttons grey once the entity is no longer in the group.
+of the entity has its audio open. _Direct: Answer_ is grey while nobody rings, and the direct
+call's Talk buttons while no call is active. A group's buttons grey once the entity is no longer in
+the group.
 
 The grey look lives in the presets: a preset's base style is the grey, and its feedbacks paint the
 ordinary look while the button can work. Only **Connection Ready**, **Group Talk Available**,
-**Group Member** and **Direct: Answer Available** depend on that; every other feedback shows
-CrewLAN's state at all times. To give a button of your own the grey look, give it dark grey with
+**Group Member**, **Direct: Answer Available** and **Direct: Talk Available** depend on that; every
+other feedback shows CrewLAN's state at all times. To give a button of your own the grey look, give it dark grey with
 light grey text, add **Connection Ready** as its first feedback, painting its ordinary look, and
 add it once more as its last feedback, inverted, in the grey, so that no state feedback between
 them paints over the grey.
@@ -90,20 +92,31 @@ everybody is in: _‹group›: Talk (push)_, _‹group›: Talk (latch)_ and _�
 Talk (push)_. Mute silences that group alone and keeps its level. When the entity joins a group,
 its buttons appear in Companion's preset list by themselves, ready to be placed. A renamed group
 renames its presets, and a group left or removed takes them away: a button placed from them turns
-grey, and a press on it reports an error. Last comes _Direct_: _Direct: Answer_ is lit while
-somebody rings, names the caller (`$(crewlan:intercom_ringing_caller)`) and answers the call; it
-stays grey during a call, even while somebody else rings, and a press then sends nothing and logs
-`Answer: you are already in a call; hang it up first.` _Direct: Hang up_ is lit during a call,
-names the other side (`$(crewlan:intercom_call_partner)`) and ends it; with no call it does
-nothing. A caller who joined the Workspace after the connection came up shows by their id until the
-module has read their name, a moment later. Over `/api/v2` the module reads the Intercom controls
+grey, and a press on it reports an error. Last comes _Direct_, four buttons for the entity's direct
+call:
+
+- _Direct: Answer_ is lit orange while somebody rings, names the caller
+  (`$(crewlan:intercom_ringing_caller)`) and answers the call. With nobody ringing it is grey, and a
+  press sends nothing and logs `Answer: nobody is calling.`
+- _Direct: Talk (push)_ talks in the call while it is held, _Direct: Talk (latch)_ until it is
+  pressed again. Both name the other side (`$(crewlan:intercom_call_partner)`), light up while the
+  call's Talk is on, and are grey while no call is active.
+- _Direct: Hang up_ ends the active call, either side's, or cancels the entity's own call while it
+  still rings. It is lit green during the call and orange while the entity's own call rings, names
+  the other side of either (`$(crewlan:intercom_call_partner)`, empty while somebody rings the
+  entity), and with neither call it does nothing.
+
+A caller who joined the Workspace after the connection came up shows by their id until the module
+has read their name, a moment later. Over `/api/v2` the module reads the Intercom controls
 once a second while connected, so Global Talk's and the groups' Talk availability, _Direct: Answer_
 and **Microphone Live** follow the entity's audio connection within about a second. Over the Public
 API v1 the section holds Global Talk and Output Mute alone.
 
-A direct call takes the Talk keys. Talk is unavailable while the entity is in a direct call;
-answering a call lets a held Global Talk go; a Talk press during the call is refused; and after the
-hang-up nothing talks by itself — press Talk again to talk.
+Global Talk and the group Talk buttons work during a direct call too, one talk at a time: holding
+Global Talk or a group's Talk lets the call's Talk go, and holding the call's Talk lets Global Talk
+and every group's Talk go. Answering does the latter, as CrewLAN opens the call's Talk, latched, on
+both sides. Nothing comes back by itself — press the button again to talk there. The call stays up
+meanwhile; CrewLAN ends it once neither side has held the call's Talk for 20 seconds.
 
 Letting a Talk go is the one write this module never lets fail quietly, and CrewLAN always accepts
 it: it is retried, and if every attempt fails it logs an error saying the microphone may still be
@@ -125,7 +138,7 @@ exactly one entity. The connection list deliberately shows only a generic messag
 never appear on a wall-mounted surface; the specific reason is in the connection's log.
 
 On a CrewLAN workspace whose administrator switched the API v1 compatibility mode off
-(_Administration_ › _Connections_), a connection that speaks the Public API v1 shows "Authentication
+(_Administration_ › _Integrations_), a connection that speaks the Public API v1 shows "Authentication
 failure" with CrewLAN's sentence naming the switch, and the module tries again every 60
 seconds. This module speaks `/api/v2` on such a workspace and is not affected; a module
 before 2.0.0 is.
@@ -152,9 +165,9 @@ attempt every 30 seconds.
 **A button reports an error but the connection stays up.** CrewLAN rejected that one write. The most
 common cause is that the entity is not currently present in the workspace, which CrewLAN refuses;
 the log line says so, the message is also in the `last_error` variable, and the buttons turn grey.
-A Talk pressed while the entity is in a direct call is refused as well (`409 intercom_in_call`):
-hang up, then press it again. A group's button reports an error when the entity is no longer in
-that group. Action failures never take the connection down.
+A direct call's Talk pressed without an active call is refused (`409 intercom_no_call`), and so is
+_Direct: Answer_ once the call stopped ringing (`409 intercom_not_ringing`). A group's button
+reports an error when the entity is no longer in that group. Action failures never take the connection down.
 
 **Buttons went dark rather than grey.** They were placed from presets of a module before 2.0.0 and
 behave as they did — drag the preset again (see _Using it_). Status and Intercom state are cleared

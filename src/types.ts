@@ -252,10 +252,16 @@ export interface IntercomState {
 	inputMuted: boolean
 	/** Whether the participant holds an audio connection now. */
 	audioConnected: boolean
-	/** Who rings the participant, the first caller first: *Answer* answers the first. */
-	ringing: IntercomCaller[]
-	/** The current direct call, or null. */
+	/** Who rings the participant: an incoming direct call not yet answered, or null. *Answer* answers it. */
+	ringing: IntercomCaller | null
+	/** Whom the participant's own direct call rings, not yet answered, or null. *Hang up* cancels it. */
+	calling: IntercomCaller | null
+	/** Who the participant is in an active direct call with, whichever of them called, or null. */
 	call: IntercomCaller | null
+	/** Whether the participant's Talk key for the active call is held now. */
+	callTalkHeld: boolean
+	/** How it is held while `callTalkHeld`: `push` or `latch`; null while it is not held. */
+	callTalkKey: 'push' | 'latch' | null
 }
 
 /** A dropdown entry, used for both status and macro pickers. */
@@ -330,11 +336,21 @@ export interface IntegrationIntercomControls {
 	outputMuted: boolean
 	globalTalk: { held: boolean; talkKey: 'push' | 'latch' | null }
 	groupTalk: Array<{ groupId: string; talkKey: 'push' | 'latch' }>
-	call: { callerId: string } | null
-	ringing: Array<{ callerId: string }>
+	/** Absent from a Workspace that predates it, which reads as no call. */
+	directCall?: IntegrationDirectCall | null
 	audio: { connected: boolean; sending: boolean }
 	/** Not validated; the freshness rules then fall back to request ordering. */
 	changedAt?: string | null
+}
+
+/** The Entity's direct call in its controls: ringing, active, or ended a moment ago. */
+export interface IntegrationDirectCall {
+	partnerId: string
+	/** `incoming` when the partner called the Entity, `outgoing` when the Entity called. */
+	direction: 'incoming' | 'outgoing'
+	state: 'ringing' | 'active' | 'ended'
+	/** The Entity's own Talk key for the call, answered as `globalTalk` is. */
+	talk: { held: boolean; talkKey?: 'push' | 'latch' | null }
 }
 
 /** One group of `intercom.query.listGroups`, with the Entity's own listening of it. */

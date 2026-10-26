@@ -21,7 +21,12 @@ import {
 	isOwnerAbsentError,
 	statusForError,
 } from '../src/main.js'
-import type { IntegrationIntercomControls, IntegrationEventEnvelope, PublicEventEnvelope } from '../src/types.js'
+import type {
+	IntegrationDirectCall,
+	IntegrationIntercomControls,
+	IntegrationEventEnvelope,
+	PublicEventEnvelope,
+} from '../src/types.js'
 
 const silent = { debug: () => undefined, warn: () => undefined }
 
@@ -30,10 +35,16 @@ const controls: IntegrationIntercomControls = {
 	outputMuted: true,
 	globalTalk: { held: true, talkKey: 'latch' },
 	groupTalk: [{ groupId: 'grp-stage', talkKey: 'push' }],
-	call: null,
-	ringing: [{ callerId: 'ent-bob' }],
+	directCall: { partnerId: 'ent-bob', direction: 'incoming', state: 'ringing', talk: { held: false } },
 	audio: { connected: true, sending: true },
 	changedAt: '2026-10-25T20:00:00.000Z',
+}
+
+const activeCall: IntegrationDirectCall = {
+	partnerId: 'ent-bob',
+	direction: 'outgoing',
+	state: 'active',
+	talk: { held: true, talkKey: 'latch' },
 }
 
 describe('v2 translation', () => {
@@ -90,7 +101,7 @@ describe('v2 translation', () => {
 		)
 	})
 
-	it('maps Output to v1 listen and Global Talk to v1 talk, unavailable during a call', () => {
+	it('maps Output to v1 listen and Global Talk to v1 talk, available during a call too', () => {
 		assert.deepEqual(toPublicControls('ent-1', controls), {
 			entityId: 'ent-1',
 			shoutbox: {
@@ -99,8 +110,9 @@ describe('v2 translation', () => {
 			},
 			updatedAt: '2026-10-25T20:00:00.000Z',
 		})
+		assert.equal(toPublicControls('ent-1', { ...controls, directCall: activeCall }).shoutbox.talk.available, true)
 		assert.equal(
-			toPublicControls('ent-1', { ...controls, call: { callerId: 'ent-bob' } }).shoutbox.talk.available,
+			toPublicControls('ent-1', { ...controls, audio: { connected: false, sending: false } }).shoutbox.talk.available,
 			false,
 		)
 	})
@@ -124,9 +136,34 @@ describe('v2 translation', () => {
 				['grp-stage', 'Stage', true, -6, true, 'push'],
 			],
 		)
-		assert.deepEqual(state.ringing, [{ id: 'ent-bob', name: 'Bob · Camera 1' }])
+		assert.deepEqual(state.ringing, { id: 'ent-bob', name: 'Bob · Camera 1' })
+		assert.equal(state.calling, null)
 		assert.equal(state.call, null)
+		assert.equal(state.callTalkHeld, false)
 		assert.equal(state.audioConnected, true)
+	})
+
+	it('reads the direct call: who rings, whom one calls, the active call either way and its Talk', () => {
+		// A Workspace that predates the field leaves it out.
+		const predating: IntegrationIntercomControls = { ...controls }
+		delete predating.directCall
+		const read = (directCall: IntegrationDirectCall | null | undefined) => {
+			const input = directCall === undefined ? predating : { ...controls, directCall }
+			const state = toIntercomState('ent-1', [], input, new Map([['ent-bob', 'Bob']]))
+
+			return [state.ringing?.name ?? null, state.calling?.name ?? null, state.call?.name ?? null, state.callTalkKey]
+		}
+		const bob = { partnerId: 'ent-bob', talk: { held: false } } as const
+
+		assert.deepEqual(read({ ...bob, direction: 'incoming', state: 'ringing' }), ['Bob', null, null, null])
+		assert.deepEqual(read({ ...bob, direction: 'outgoing', state: 'ringing' }), [null, 'Bob', null, null])
+		assert.deepEqual(read({ ...bob, direction: 'incoming', state: 'active' }), [null, null, 'Bob', null])
+		assert.deepEqual(read(activeCall), [null, null, 'Bob', 'latch'])
+		// An ended call is no call, a Talk it reports held included.
+		assert.deepEqual(read({ ...activeCall, state: 'ended' }), [null, null, null, null])
+		assert.deepEqual(read(null), [null, null, null, null])
+		assert.deepEqual(read(undefined), [null, null, null, null])
+		assert.equal(toIntercomState('ent-1', [], { ...controls, directCall: activeCall }, new Map()).call?.name, 'ent-bob')
 	})
 
 	it('reads event: gap and event: ended as named frames', () => {
@@ -156,7 +193,7 @@ describe('v2 translation', () => {
 
 	it("shows v1's compatibility_mode_off as an authentication failure with CrewLAN's sentence, retried after 60 s", () => {
 		const sentence =
-			'the v1 compatibility mode is off in this Workspace: an administrator switches it on in Administration, under Connections'
+			'the v1 compatibility mode is off in this Workspace: an administrator switches it on in Administration, under Integrations'
 		const error = new CrewLanApiError(sentence, 403, 'http', 'forbidden')
 
 		assert.equal(statusForError(error), InstanceStatus.AuthenticationFailure)
@@ -290,6 +327,7 @@ describe('v2 client against a fake /api/v2', () => {
 		await client.patchEntityControls('ent-1', { shoutbox: { talk: { active: true, controlMode: 'push' } } })
 		await client.patchEntityControls('ent-1', { shoutbox: { talk: { active: false, controlMode: null } } })
 		await client.setControls('ent-1', { groupTalk: { groupId: 'grp-stage', held: true, talkKey: 'latch' } })
+		await client.setControls('ent-1', { callTalk: { held: true, talkKey: 'push' } })
 		await client.setControls('ent-1', { call: null })
 		assert.deepEqual(await client.dismissEntityAlerts('ent-1'), { entityId: 'ent-1', dismissedCount: 2 })
 
@@ -301,6 +339,7 @@ describe('v2 client against a fake /api/v2', () => {
 				['intercom.command.setControls', { globalTalk: true, talkKey: 'push' }],
 				['intercom.command.setControls', { globalTalk: false }],
 				['intercom.command.setControls', { groupTalk: { groupId: 'grp-stage', held: true, talkKey: 'latch' } }],
+				['intercom.command.setControls', { callTalk: { held: true, talkKey: 'push' } }],
 				['intercom.command.setControls', { call: null }],
 				['alerts.command.acknowledgeAlerts', { allOpen: true }],
 			],

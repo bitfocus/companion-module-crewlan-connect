@@ -68,6 +68,17 @@ export type ActionsSchema = {
 	call_answer: {
 		options: Record<string, never>
 	}
+	call_talk_push_down: {
+		options: Record<string, never>
+	}
+	call_talk_push_up: {
+		options: Record<string, never>
+	}
+	call_talk_latch: {
+		options: {
+			mode: LatchMode
+		}
+	}
 	call_hang_up: {
 		options: Record<string, never>
 	}
@@ -324,7 +335,7 @@ export function UpdateActions(self: ModuleInstance): void {
 		call_answer: {
 			name: 'Direct: Answer',
 			description:
-				'Answers the direct call of whoever rings first. Does nothing when nobody rings or while you are already in a call. Needs a Workspace serving /api/v2.',
+				'Answers the direct call ringing you. Does nothing when nobody rings. Needs a Workspace serving /api/v2.',
 			options: [],
 			callback: async () => {
 				await self.runCrewLanAction('Answer', async () => {
@@ -332,9 +343,55 @@ export function UpdateActions(self: ModuleInstance): void {
 				})
 			},
 		},
+		call_talk_push_down: {
+			name: 'Direct Talk Push Down',
+			description:
+				'Talks in the active direct call. Pair with "Direct Talk Push Up" on the button release. Needs a Workspace serving /api/v2.',
+			options: [],
+			callback: async () => {
+				await self.runCrewLanAction('Direct Talk Push Down', async () => {
+					await self.setCallTalk(true, 'push')
+				})
+			},
+		},
+		call_talk_push_up: {
+			name: 'Direct Talk Push Up',
+			description: 'Stops talking in the direct call. Letting go is never refused.',
+			options: [],
+			callback: async () => {
+				await self.runCrewLanAction('Direct Talk Push Up', async () => {
+					await self.setCallTalk(false, 'push')
+				})
+			},
+		},
+		call_talk_latch: {
+			name: 'Direct Talk Latch Toggle/On/Off',
+			description:
+				'Starts or stops talking in the active direct call and keeps it that way until changed again. Needs a Workspace serving /api/v2.',
+			options: [
+				{
+					id: 'mode',
+					type: 'dropdown',
+					label: 'Mode',
+					default: 'toggle',
+					choices: [
+						{ id: 'toggle', label: 'Toggle' },
+						{ id: 'on', label: 'On' },
+						{ id: 'off', label: 'Off' },
+					],
+					disableAutoExpression: true,
+				},
+			],
+			callback: async (event) => {
+				await self.runCrewLanAction('Direct Talk Latch', async () => {
+					await self.setCallTalkLatchMode(asLatchMode(event.options.mode))
+				})
+			},
+		},
 		call_hang_up: {
 			name: 'Direct: Hang up',
-			description: 'Hangs up the current call. Does nothing when there is none. Needs a Workspace serving /api/v2.',
+			description:
+				'Hangs up the active direct call, or cancels your own call while it still rings. Does nothing when there is neither. Needs a Workspace serving /api/v2.',
 			options: [],
 			callback: async () => {
 				await self.runCrewLanAction('Hang up', async () => {

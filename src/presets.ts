@@ -252,13 +252,46 @@ export function UpdatePresets(self: ModuleInstance): void {
 			steps: [{ down: [{ actionId: 'call_answer', options: {} }], up: [] }],
 		})
 
+		const callTalkPushText = `Talk Push\n$(${self.label}:intercom_call_partner)`
+		const callTalkPushStyle = keyStyle(callTalkPushText, 0xffffff, talkInactiveColor)
+		presets.call_talk_push = greyedPreset({
+			name: 'Direct: Talk (push)',
+			style: callTalkPushStyle,
+			ready: { feedbackId: 'call_talk_available', options: {}, style: callTalkPushStyle },
+			states: [
+				{ feedbackId: 'call_talk_active', options: {}, style: keyStyle(callTalkPushText, 0x000000, talkActiveColor) },
+			],
+			steps: [
+				{
+					down: [{ actionId: 'call_talk_push_down', options: {} }],
+					up: [{ actionId: 'call_talk_push_up', options: {} }],
+				},
+			],
+		})
+
+		const callTalkLatchText = `Talk Latch\n$(${self.label}:intercom_call_partner)`
+		const callTalkLatchStyle = keyStyle(callTalkLatchText, 0xffffff, talkInactiveColor)
+		presets.call_talk_latch = greyedPreset({
+			name: 'Direct: Talk (latch)',
+			style: callTalkLatchStyle,
+			ready: { feedbackId: 'call_talk_available', options: {}, style: callTalkLatchStyle },
+			states: [
+				{ feedbackId: 'call_talk_active', options: {}, style: keyStyle(callTalkLatchText, 0x000000, talkActiveColor) },
+			],
+			steps: [{ down: [{ actionId: 'call_talk_latch', options: { mode: 'toggle' } }], up: [] }],
+		})
+
+		// Lit while there is something to hang up: the active call, or the participant's own call ringing.
 		const hangUpText = `Hang up\n$(${self.label}:intercom_call_partner)`
 		const hangUpStyle = keyStyle(hangUpText, 0xffffff, callIdleColor)
 		presets.call_hang_up = greyedPreset({
 			name: 'Direct: Hang up',
 			style: hangUpStyle,
 			ready: connectionReady(hangUpStyle),
-			states: [{ feedbackId: 'call_active', options: {}, style: keyStyle(hangUpText, 0x000000, callActiveColor) }],
+			states: [
+				{ feedbackId: 'call_calling', options: {}, style: keyStyle(hangUpText, 0x000000, callRingingColor) },
+				{ feedbackId: 'call_active', options: {}, style: keyStyle(hangUpText, 0x000000, callActiveColor) },
+			],
 			steps: [{ down: [{ actionId: 'call_hang_up', options: {} }], up: [] }],
 		})
 	}
@@ -323,7 +356,7 @@ export function UpdatePresets(self: ModuleInstance): void {
 								id: 'intercom-direct',
 								type: 'simple' as const,
 								name: 'Direct',
-								presets: ['call_answer', 'call_hang_up'],
+								presets: ['call_answer', 'call_talk_push', 'call_talk_latch', 'call_hang_up'],
 							},
 						]),
 			],

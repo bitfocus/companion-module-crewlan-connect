@@ -31,6 +31,8 @@ function actions(): { definitions: Record<string, { callback: Callback }>; calls
 		setGroupTalkLatchMode: record('setGroupTalkLatchMode'),
 		setGroupMuteMode: record('setGroupMuteMode'),
 		answerCall: record('answerCall'),
+		setCallTalk: record('setCallTalk'),
+		setCallTalkLatchMode: record('setCallTalkLatchMode'),
 		hangUpCall: record('hangUpCall'),
 		setActionDefinitions: (captured: Record<string, { callback: Callback }>) => {
 			definitions = captured
@@ -86,6 +88,30 @@ describe('Companion intercom actions', () => {
 			],
 		],
 		['call_answer', {}, [['runCrewLanAction', 'Answer'], ['answerCall']]],
+		[
+			'call_talk_push_down',
+			{},
+			[
+				['runCrewLanAction', 'Direct Talk Push Down'],
+				['setCallTalk', true, 'push'],
+			],
+		],
+		[
+			'call_talk_push_up',
+			{},
+			[
+				['runCrewLanAction', 'Direct Talk Push Up'],
+				['setCallTalk', false, 'push'],
+			],
+		],
+		[
+			'call_talk_latch',
+			{ mode: 'on' },
+			[
+				['runCrewLanAction', 'Direct Talk Latch'],
+				['setCallTalkLatchMode', 'on'],
+			],
+		],
 		['call_hang_up', {}, [['runCrewLanAction', 'Hang up'], ['hangUpCall']]],
 	]
 

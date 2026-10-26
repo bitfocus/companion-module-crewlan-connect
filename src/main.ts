@@ -108,8 +108,11 @@ const feedbackStateGroups: Record<keyof FeedbacksSchema, StateGroup | readonly S
 	group_talk_active: 'intercom',
 	group_muted: 'intercom',
 	call_ringing: 'intercom',
+	call_calling: 'intercom',
 	call_active: 'intercom',
 	answer_available: ['connection', 'intercom'],
+	call_talk_available: ['connection', 'intercom'],
+	call_talk_active: 'intercom',
 	group_member: ['connection', 'intercom'],
 }
 
@@ -742,24 +745,16 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		})
 	}
 
-	/**
-	 * Answers the first caller of `ringing` (*Answer*), v2 only. With nobody ringing, or while a call
-	 * is already up, it logs why and sends nothing: *Answer* is unavailable during a call.
-	 */
+	/** Answers the direct call ringing the participant (*Answer*), v2 only; with none it logs so and sends nothing. */
 	async answerCall(): Promise<void> {
 		const api = this.requireIntegrationApi('Answer')
-		const caller = this.state.intercom?.ringing[0]
+		const caller = this.state.intercom?.ringing ?? null
 
 		if (api === null) {
 			return
 		}
 
-		if ((this.state.intercom?.call ?? null) !== null) {
-			this.log('warn', 'Answer: you are already in a call; hang it up first.')
-			return
-		}
-
-		if (caller === undefined) {
+		if (caller === null) {
 			this.log('info', 'Answer: nobody is calling.')
 			return
 		}
@@ -769,7 +764,41 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		})
 	}
 
-	/** Hangs up the current direct call (*Hang up*), v2 only; with none it changes nothing. */
+	/**
+	 * Holds (`held`) or lets go the active direct call's Talk key, `push` or `latch`, v2 only. CrewLAN
+	 * refuses a hold without an active call; letting go is sent and retried as Global Talk's release is.
+	 */
+	async setCallTalk(held: boolean, talkKey: 'push' | 'latch'): Promise<void> {
+		const api = this.requireIntegrationApi('Direct Talk')
+
+		if (api === null) {
+			return
+		}
+
+		await this.enqueueTalkWrite(async () => {
+			await this.writeCallTalk(api, held, talkKey)
+		})
+	}
+
+	/** Latches, unlatches or toggles the direct call's Talk key, decided inside the talk queue, v2 only. */
+	async setCallTalkLatchMode(mode: 'toggle' | 'on' | 'off'): Promise<void> {
+		const api = this.requireIntegrationApi('Direct Talk')
+
+		if (api === null) {
+			return
+		}
+
+		await this.enqueueTalkWrite(async () => {
+			const held = mode === 'toggle' ? this.state.intercom?.callTalkHeld !== true : mode === 'on'
+
+			await this.writeCallTalk(api, held, 'latch')
+		})
+	}
+
+	/**
+	 * Hangs up the active direct call, or cancels the participant's own ringing one (*Hang up*), v2
+	 * only; with neither it changes nothing.
+	 */
 	async hangUpCall(): Promise<void> {
 		const api = this.requireIntegrationApi('Hang up')
 
@@ -833,6 +862,16 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		await this.writeIntegrationControls(api, { groupTalk: { groupId, held: true, talkKey } })
 	}
 
+	private async writeCallTalk(api: CrewLanV2Client, held: boolean, talkKey: 'push' | 'latch'): Promise<void> {
+		if (held) {
+			await this.writeIntegrationControls(api, { callTalk: { held: true, talkKey } })
+		} else {
+			await this.releaseTalk('Direct Talk', async (options) => {
+				await this.writeIntegrationControls(api, { callTalk: { held: false } }, options)
+			})
+		}
+	}
+
 	/** One `intercom.command.setControls`, its answer applied as a controls patch's is. */
 	private async writeIntegrationControls(
 		api: CrewLanV2Client,
@@ -850,7 +889,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		this.lastLocalWriteAt = Date.now()
 
 		// A release is answered while the Entity is absent too, so only another write shows presence.
-		if (body.globalTalk !== false && body.groupTalk?.held !== false) {
+		if (body.globalTalk !== false && body.groupTalk?.held !== false && body.callTalk?.held !== false) {
 			this.notePresent()
 		}
 
@@ -1925,7 +1964,9 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		// for a failed action.
 		if (
 			error instanceof CrewLanApiError &&
-			(error.code === 'intercom_in_call' || error.code === 'intercom_not_member')
+			(error.code === 'intercom_not_member' ||
+				error.code === 'intercom_no_call' ||
+				error.code === 'intercom_not_ringing')
 		) {
 			this.log('error', message)
 			this.updateState({ lastError: message })
