@@ -9,7 +9,7 @@ import type { CrewLanState, PublicMacroDto, PublicStatusDto } from '../src/types
 
 /** The state slice UpdatePresets reads: which API is spoken and the intercom over v2. */
 function presetState(input: Partial<CrewLanState> = {}): CrewLanState {
-	return { api: 'v1', intercom: null, ...input } as CrewLanState
+	return { api: 'v1', intercom: null, requests: null, indicators: [], ...input } as CrewLanState
 }
 
 function createStatus(input: Partial<PublicStatusDto>): PublicStatusDto {

@@ -4,6 +4,8 @@ import type {
 	CompanionPresetSection,
 	CompanionSimplePresetDefinition,
 } from '@companion-module/base'
+import { wireRequests } from './api-v2.js'
+import { isOffered } from './feedbacks.js'
 import type ModuleInstance from './main.js'
 import type { ModuleSchema } from './main.js'
 import { getCompanionMacroButtonStyle, getCompanionStatusButtonStyle, getOfflineButtonStyle } from './button-style.js'
@@ -69,14 +71,21 @@ function connectionReady(style: CompanionButtonStyleProps): PresetFeedback {
 // v1's talk availability says nothing of the owner's presence, so the Global Talk keys grey on both.
 const globalTalkAlsoReady: PresetFeedback[] = [{ feedbackId: 'connection_ready', options: {}, style: {} }]
 
+/**
+ * The presets offered are those whose actions' requests the connection's offer holds now (over v1,
+ * which says no offer, all of them): a connection acting for a status indicator is offered its
+ * indicator's keys alone. A key placed before its request was withdrawn greys by its readiness
+ * feedback.
+ */
 export function UpdatePresets(self: ModuleInstance): void {
-	const selectableStatuses = self.getSelectableStatuses()
 	const state = self.getCrewLanState()
+	const selectableStatuses = isOffered(state, wireRequests.setEntityStatus) ? self.getSelectableStatuses() : []
 	const presets: CompanionPresetDefinitions<ModuleSchema> = {}
-	// The "status_"/"macro_"/"group_" prefixes keep the generated ids apart from each other and from
-	// the fixed ids below, whatever CrewLAN names a status, a macro or a group.
+	// The "status_"/"macro_"/"group_"/"indicator_" prefixes keep the generated ids apart from each
+	// other and from the fixed ids below, whatever CrewLAN names a status, a macro, a group or an indicator.
 	const statusPresetIds: string[] = []
 	const macroPresetIds: string[] = []
+	const indicatorDefinitions: { id: string; type: 'simple'; name: string; presets: string[] }[] = []
 
 	for (const status of selectableStatuses) {
 		const inactiveStyle = getCompanionStatusButtonStyle(status, false)
@@ -93,7 +102,45 @@ export function UpdatePresets(self: ModuleInstance): void {
 		})
 	}
 
-	for (const macro of self.getRunnableMacros()) {
+	for (const indicator of state.indicators) {
+		const presetIds: string[] = []
+
+		for (const statusId of indicator.statusIds) {
+			const status = state.statuses.find((candidate) => candidate.id === statusId)
+
+			// A status the catalogue does not hold yet has no look; the next snapshot brings it.
+			if (status === undefined) {
+				continue
+			}
+
+			const inactive = getCompanionStatusButtonStyle(status, false)
+			const text = `${indicator.name}\n${inactive.text}`
+			const inactiveStyle = { ...inactive, text }
+			const activeStyle = { ...getCompanionStatusButtonStyle(status, true), text }
+			const options = { indicatorId: indicator.id, statusId }
+			const presetId = `indicator_${indicator.id}_${statusId}`
+
+			presetIds.push(presetId)
+			presets[presetId] = greyedPreset({
+				name: `${indicator.name}: ${inactive.text}`,
+				style: inactiveStyle,
+				ready: { feedbackId: 'indicator_ready', options, style: inactiveStyle },
+				states: [{ feedbackId: 'indicator_status_is', options, style: activeStyle }],
+				steps: [{ down: [{ actionId: 'set_indicator_status', options }], up: [] }],
+			})
+		}
+
+		if (presetIds.length > 0) {
+			indicatorDefinitions.push({
+				id: `indicator-${indicator.id}`,
+				type: 'simple',
+				name: indicator.name,
+				presets: presetIds,
+			})
+		}
+	}
+
+	for (const macro of isOffered(state, wireRequests.runMacro) ? self.getRunnableMacros() : []) {
 		const idleStyle = getCompanionMacroButtonStyle(macro, false)
 		const runningStyle = getCompanionMacroButtonStyle(macro, true)
 		const presetId = `macro_${macro.id}`
@@ -109,56 +156,64 @@ export function UpdatePresets(self: ModuleInstance): void {
 	}
 
 	// The fixed ids keep their 1.x names: a placed button does not refer to its preset.
-	const talkPushStyle = keyStyle('Global Talk\nPush', 0xffffff, talkInactiveColor)
-	presets.talk_push = greyedPreset({
-		name: 'Global Talk (push)',
-		style: talkPushStyle,
-		ready: { feedbackId: 'talk_available', options: {}, style: talkPushStyle },
-		alsoReady: globalTalkAlsoReady,
-		states: [
-			{
-				feedbackId: 'talk_push_active',
-				options: {},
-				style: keyStyle('Global Talk\nPush', 0x000000, talkActiveColor),
-			},
-		],
-		steps: [
-			{
-				down: [{ actionId: 'talk_push_down', options: {} }],
-				up: [{ actionId: 'talk_push_up', options: {} }],
-			},
-		],
-	})
+	const controlsOffered = isOffered(state, wireRequests.setControls)
+	const intercomPresetIds: string[] = []
+	if (controlsOffered) {
+		const talkPushStyle = keyStyle('Global Talk\nPush', 0xffffff, talkInactiveColor)
+		presets.talk_push = greyedPreset({
+			name: 'Global Talk (push)',
+			style: talkPushStyle,
+			ready: { feedbackId: 'talk_available', options: {}, style: talkPushStyle },
+			alsoReady: globalTalkAlsoReady,
+			states: [
+				{
+					feedbackId: 'talk_push_active',
+					options: {},
+					style: keyStyle('Global Talk\nPush', 0x000000, talkActiveColor),
+				},
+			],
+			steps: [
+				{
+					down: [{ actionId: 'talk_push_down', options: {} }],
+					up: [{ actionId: 'talk_push_up', options: {} }],
+				},
+			],
+		})
 
-	const talkLatchStyle = keyStyle('Global Talk\nLatch', 0xffffff, talkInactiveColor)
-	presets.talk_latch_toggle = greyedPreset({
-		name: 'Global Talk (latch)',
-		style: talkLatchStyle,
-		ready: { feedbackId: 'talk_available', options: {}, style: talkLatchStyle },
-		alsoReady: globalTalkAlsoReady,
-		states: [
-			{
-				feedbackId: 'talk_latch_active',
-				options: {},
-				style: keyStyle('Global Talk\nLatch', 0x000000, talkActiveColor),
-			},
-		],
-		steps: [{ down: [{ actionId: 'talk_latch', options: { mode: 'toggle' } }], up: [] }],
-	})
+		const talkLatchStyle = keyStyle('Global Talk\nLatch', 0xffffff, talkInactiveColor)
+		presets.talk_latch_toggle = greyedPreset({
+			name: 'Global Talk (latch)',
+			style: talkLatchStyle,
+			ready: { feedbackId: 'talk_available', options: {}, style: talkLatchStyle },
+			alsoReady: globalTalkAlsoReady,
+			states: [
+				{
+					feedbackId: 'talk_latch_active',
+					options: {},
+					style: keyStyle('Global Talk\nLatch', 0x000000, talkActiveColor),
+				},
+			],
+			steps: [{ down: [{ actionId: 'talk_latch', options: { mode: 'toggle' } }], up: [] }],
+		})
 
-	const outputStyle = keyStyle('Output\nMute', 0xffffff, listenUnmutedColor)
-	presets.listen_mute_toggle = greyedPreset({
-		name: 'Output Mute',
-		style: outputStyle,
-		ready: connectionReady(outputStyle),
-		states: [{ feedbackId: 'listen_muted', options: {}, style: keyStyle('Output\nMute', 0xffffff, listenMutedColor) }],
-		steps: [{ down: [{ actionId: 'listen_mute', options: { mode: 'toggle' } }], up: [] }],
-	})
+		const outputStyle = keyStyle('Output\nMute', 0xffffff, listenUnmutedColor)
+		presets.listen_mute_toggle = greyedPreset({
+			name: 'Output Mute',
+			style: outputStyle,
+			ready: connectionReady(outputStyle),
+			states: [
+				{ feedbackId: 'listen_muted', options: {}, style: keyStyle('Output\nMute', 0xffffff, listenMutedColor) },
+			],
+			steps: [{ down: [{ actionId: 'listen_mute', options: { mode: 'toggle' } }], up: [] }],
+		})
+		intercomPresetIds.push('talk_push', 'talk_latch_toggle', 'listen_mute_toggle')
+	}
 
-	const intercomPresetIds = ['talk_push', 'talk_latch_toggle', 'listen_mute_toggle']
 	const groupDefinitions: { id: string; type: 'simple'; name: string; presets: string[] }[] = []
-	// Over v1 (or before the first read) the section holds v1's one Talk and Mute alone.
-	const intercom = state.api === 'v2' ? state.intercom : null
+	// Over v1 (or before the first read) the section holds v1's one Talk and Mute alone; over v2 the
+	// rest needs the controls read and written.
+	const intercom = state.api === 'v2' && controlsOffered ? state.intercom : null
+	const listeningOffered = isOffered(state, wireRequests.setListening)
 
 	if (intercom !== null) {
 		const inputStyle = keyStyle('Input\nMute', 0xffffff, listenUnmutedColor)
@@ -217,27 +272,29 @@ export function UpdatePresets(self: ModuleInstance): void {
 				steps: [{ down: [{ actionId: 'group_talk_latch', options: { groupId, mode: 'toggle' } }], up: [] }],
 			})
 
-			const muteStyle = keyStyle(`${group.name}\nMute`, 0xffffff, listenUnmutedColor)
-			presets[muteId] = greyedPreset({
-				name: `${group.name}: Mute`,
-				style: muteStyle,
-				// A group left or removed greys its Mute too, as its Talk keys.
-				ready: { feedbackId: 'group_member', options: { groupId }, style: muteStyle },
-				states: [
-					{
-						feedbackId: 'group_muted',
-						options: { groupId },
-						style: keyStyle(`${group.name}\nMute`, 0xffffff, listenMutedColor),
-					},
-				],
-				steps: [{ down: [{ actionId: 'group_mute', options: { groupId, mode: 'toggle' } }], up: [] }],
-			})
+			if (listeningOffered) {
+				const muteStyle = keyStyle(`${group.name}\nMute`, 0xffffff, listenUnmutedColor)
+				presets[muteId] = greyedPreset({
+					name: `${group.name}: Mute`,
+					style: muteStyle,
+					// A group left or removed greys its Mute too, as its Talk keys.
+					ready: { feedbackId: 'group_member', options: { groupId }, style: muteStyle },
+					states: [
+						{
+							feedbackId: 'group_muted',
+							options: { groupId },
+							style: keyStyle(`${group.name}\nMute`, 0xffffff, listenMutedColor),
+						},
+					],
+					steps: [{ down: [{ actionId: 'group_mute', options: { groupId, mode: 'toggle' } }], up: [] }],
+				})
+			}
 
 			groupDefinitions.push({
 				id: `intercom-group-${groupId}`,
 				type: 'simple',
 				name: group.name,
-				presets: [pushId, latchId, muteId],
+				presets: listeningOffered ? [pushId, latchId, muteId] : [pushId, latchId],
 			})
 		}
 
@@ -296,14 +353,18 @@ export function UpdatePresets(self: ModuleInstance): void {
 		})
 	}
 
+	const alertsOffered = isOffered(state, wireRequests.acknowledgeAlerts)
 	const dismissStyle = keyStyle('Dismiss\nAlerts', 0x000000, 0xffffff)
-	presets.dismiss_alerts = greyedPreset({
-		name: 'Dismiss Alerts',
-		style: dismissStyle,
-		ready: connectionReady(dismissStyle),
-		states: [],
-		steps: [{ down: [{ actionId: 'dismiss_alerts', options: {} }], up: [] }],
-	})
+
+	if (alertsOffered) {
+		presets.dismiss_alerts = greyedPreset({
+			name: 'Dismiss Alerts',
+			style: dismissStyle,
+			ready: connectionReady(dismissStyle),
+			states: [],
+			steps: [{ down: [{ actionId: 'dismiss_alerts', options: {} }], up: [] }],
+		})
+	}
 
 	const structure: CompanionPresetSection<ModuleSchema>[] = [
 		...(statusPresetIds.length > 0
@@ -322,6 +383,9 @@ export function UpdatePresets(self: ModuleInstance): void {
 					},
 				]
 			: []),
+		...(indicatorDefinitions.length > 0
+			? [{ id: 'indicators', name: 'Status Indicators', definitions: indicatorDefinitions }]
+			: []),
 		...(macroPresetIds.length > 0
 			? [
 					{
@@ -338,41 +402,49 @@ export function UpdatePresets(self: ModuleInstance): void {
 					},
 				]
 			: []),
-		{
-			id: 'intercom',
-			name: 'Intercom',
-			definitions: [
-				{
-					id: 'intercom-controls',
-					type: 'simple',
-					name: intercom === null ? 'Global Talk and Output' : 'Global Talk, Output and Input',
-					presets: intercomPresetIds,
-				},
-				...groupDefinitions,
-				...(intercom === null
-					? []
-					: [
+		...(controlsOffered
+			? [
+					{
+						id: 'intercom',
+						name: 'Intercom',
+						definitions: [
 							{
-								id: 'intercom-direct',
+								id: 'intercom-controls',
 								type: 'simple' as const,
-								name: 'Direct',
-								presets: ['call_answer', 'call_talk_push', 'call_talk_latch', 'call_hang_up'],
+								name: intercom === null ? 'Global Talk and Output' : 'Global Talk, Output and Input',
+								presets: intercomPresetIds,
 							},
-						]),
-			],
-		},
-		{
-			id: 'alerts',
-			name: 'Alerts',
-			definitions: [
-				{
-					id: 'alert-actions',
-					type: 'simple',
-					name: 'Alert Actions',
-					presets: ['dismiss_alerts'],
-				},
-			],
-		},
+							...groupDefinitions,
+							...(intercom === null
+								? []
+								: [
+										{
+											id: 'intercom-direct',
+											type: 'simple' as const,
+											name: 'Direct',
+											presets: ['call_answer', 'call_talk_push', 'call_talk_latch', 'call_hang_up'],
+										},
+									]),
+						],
+					},
+				]
+			: []),
+		...(alertsOffered
+			? [
+					{
+						id: 'alerts',
+						name: 'Alerts',
+						definitions: [
+							{
+								id: 'alert-actions',
+								type: 'simple' as const,
+								name: 'Alert Actions',
+								presets: ['dismiss_alerts'],
+							},
+						],
+					},
+				]
+			: []),
 	]
 
 	self.setPresetDefinitions(structure, presets)

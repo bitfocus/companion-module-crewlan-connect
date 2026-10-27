@@ -16,8 +16,10 @@ import {
 	isIntegrationEventEnvelope,
 	isIntegrationGroupList,
 	isIntegrationGroupView,
+	isIntegrationIndicatorView,
 	isIntegrationIntercomControls,
 	isIntegrationMacroView,
+	isIntegrationOffer,
 	isIntegrationSnapshot,
 	isItemResponse,
 	type Guard,
@@ -27,9 +29,13 @@ import type {
 	IntegrationEntityStatusView,
 	IntegrationEventEnvelope,
 	IntegrationGroupView,
+	IntegrationIndicatorOffer,
+	IntegrationIndicatorView,
 	IntegrationIntercomControls,
 	IntegrationMacroView,
+	IntegrationOffer,
 	IntegrationStatusView,
+	IndicatorState,
 	IntercomState,
 	PublicDismissEntityAlertsDto,
 	PublicEntityControlsDto,
@@ -69,7 +75,30 @@ export const integrationEventTypes = [
 	'intercom.event.groupRemoved',
 	'intercom.event.memberAdded',
 	'intercom.event.memberRemoved',
+	'status.event.indicatorStatusChanged',
+	'entities.event.indicatorUpdated',
 ] as const
+
+/** The wire ids of the requests the module makes over `/api/v2`, each sent only while the offer holds it. */
+export const wireRequests = {
+	setEntityStatus: 'status.command.setEntityStatus',
+	setIndicatorStatus: 'status.command.setIndicatorStatus',
+	setControls: 'intercom.command.setControls',
+	setListening: 'intercom.command.setListening',
+	getControls: 'intercom.query.getControls',
+	listGroups: 'intercom.query.listGroups',
+	listMacros: 'macros.query.listMacros',
+	runMacro: 'macros.command.runMacro',
+	acknowledgeAlerts: 'alerts.command.acknowledgeAlerts',
+} as const
+
+/** The code of the refusal the module gives itself for a request its offer does not hold, as CrewLAN's own. */
+export const requestNotOfferedCode = 'request_not_offered'
+
+/** Whether an action was refused here, before anything was sent, because the offer does not hold its request. */
+export function isRequestNotOfferedLocally(error: unknown): boolean {
+	return error instanceof CrewLanApiError && error.kind === 'client' && error.code === requestNotOfferedCode
+}
 
 /** v2's built-in status words and the v1 ids users' buttons keep, as v1 names them. */
 const v1StatusIds: Readonly<Record<string, string>> = {
@@ -149,6 +178,26 @@ export function toPublicStatus(view: IntegrationStatusView): PublicStatusDto {
 		...(view.animation === undefined ? {} : { motionPreset: view.animation }),
 		selectable: view.selectable,
 	}
+}
+
+/**
+ * The status indicators of an offer as the module shows them: each named and standing as `views`
+ * say, by its id where they do not hold it, its statuses as the module's status ids.
+ */
+export function toIndicatorStates(
+	offered: readonly IntegrationIndicatorOffer[],
+	views: ReadonlyMap<string, IntegrationIndicatorView>,
+): IndicatorState[] {
+	return offered.map((entry) => {
+		const view = views.get(entry.indicatorId)
+
+		return {
+			id: entry.indicatorId,
+			name: view?.displayIdentity ?? entry.indicatorId,
+			statusIds: entry.statusIds.map(toV1StatusId),
+			statusId: view === undefined ? null : toV1StatusId(view.statusId),
+		}
+	})
 }
 
 /** One Entity's status in v1's shape, or null where its status is not in `statuses`. */
@@ -286,16 +335,22 @@ export async function probeIntegrationApi(
 	}
 }
 
-/** Everything one snapshot gives the module, in v1's shapes, plus the intercom only v2 has. */
+/** Everything one snapshot gives the module, in v1's shapes, plus what only v2 has. */
 export interface IntegrationState {
 	entityId: string
 	workspace: PublicWorkspaceDto
 	entity: PublicEntityDto
+	/** `identity` or `indicator`; null from a CrewLAN whose snapshot does not say. */
+	targetKind: string | null
+	/** Whether the target attends now; null from a CrewLAN whose snapshot does not say. */
+	attends: boolean | null
 	statuses: PublicStatusDto[]
 	status: PublicEntityStatusDto | null
-	controls: PublicEntityControlsDto
+	/** Null, as `intercom`, where the offer holds no `intercom.query.getControls`: nothing was read. */
+	controls: PublicEntityControlsDto | null
 	macros: PublicMacroDto[]
-	intercom: IntercomState
+	intercom: IntercomState | null
+	indicators: IndicatorState[]
 }
 
 /** A body of `intercom.command.setControls`, the fields the module sends. */
@@ -317,36 +372,89 @@ function isAcknowledged(value: unknown): value is { acknowledged: unknown[] } {
 
 /**
  * The `/api/v2` client of one connection. It keeps what translating needs between requests — the
- * status catalogue, the participants' names, the last controls and groups — each replaced by the
- * next snapshot.
+ * status catalogue, the participants' names, the last controls and groups, the indicators' names —
+ * each replaced by the next snapshot, and what the connection may request now: `GET /api/v2`'s
+ * offer, replaced by every `offer` record its stream writes. **A request the offer does not hold is
+ * never sent**: it is refused here, so the module follows what CrewLAN says it may do and keeps no
+ * rule of its own about owners, levels or the target's kind.
  */
 export class CrewLanV2Client {
 	readonly baseUrl: string
 	private statuses: PublicStatusDto[] = []
 	private participants = new Map<string, string>()
 	private controls: IntegrationIntercomControls | null = null
-	private groups: IntegrationGroupView[] | null = null
+	private groups: IntegrationGroupView[] = []
 	private entityId: string | null = null
+	private indicatorViews = new Map<string, IntegrationIndicatorView>()
+	private offer: IntegrationOffer
 
 	constructor(
 		private readonly http: CrewLanApiClient,
-		private readonly description: IntegrationDescription,
+		description: IntegrationDescription,
 		private readonly logger: CrewLanApiLogger,
 	) {
 		this.baseUrl = http.baseUrl
+		this.offer = description
 	}
 
-	/** Whether this connection may run macros, as `GET /api/v2` offered it. */
+	/** Whether this connection may run macros, as its offer says now. */
 	get mayRunMacros(): boolean {
-		return this.description.requests.some((request) => request.wireId === 'macros.command.runMacro')
+		return this.offers(wireRequests.runMacro)
 	}
 
-	/** The snapshot, the controls and the groups, read at once: what a connect and a resync need. */
+	/** Whether the offer holds `wireId` now. */
+	offers(wireId: string): boolean {
+		return this.offer.requests.some((request) => request.wireId === wireId)
+	}
+
+	/** The wire ids of every request the offer holds now. */
+	offeredRequests(): string[] {
+		return this.offer.requests.map((request) => request.wireId)
+	}
+
+	/** The status indicators this connection may set now, named and standing as the last snapshot and events say. */
+	indicators(): IndicatorState[] {
+		return toIndicatorStates(this.offer.indicators ?? [], this.indicatorViews)
+	}
+
+	/** Whether the offer names an indicator the last snapshot did not carry, so its name is not known. */
+	hasUnnamedIndicators(): boolean {
+		return (this.offer.indicators ?? []).some((entry) => !this.indicatorViews.has(entry.indicatorId))
+	}
+
+	/** Takes what the stream's `offer` record says, or a new `GET /api/v2`'s, as what this connection may do now. */
+	applyOffer(offer: IntegrationOffer): void {
+		this.offer = { requests: offer.requests, indicators: offer.indicators ?? [] }
+
+		// What the offer no longer lets the module read is not shown as if it were still current.
+		if (!this.offers(wireRequests.getControls)) {
+			this.controls = null
+		}
+
+		if (!this.offers(wireRequests.listGroups)) {
+			this.groups = []
+		}
+	}
+
+	/** Reads `GET /api/v2` again, for the offer, while no stream says it. */
+	async readOffer(options: RequestOptions = {}): Promise<void> {
+		this.applyOffer((await this.http.request('/api/v2', {}, options, isItemResponse(isIntegrationDescription))).data)
+	}
+
+	/**
+	 * The snapshot, and the controls and the groups where the offer holds their reads, read at once:
+	 * what a connect and a resync need. A connection acting for a status indicator is offered
+	 * neither, and asks for neither.
+	 */
 	async loadSnapshot(options: RequestOptions = {}): Promise<IntegrationState> {
 		const [snapshot, controls, groups] = await Promise.all([
 			this.http.request('/api/v2/snapshot', {}, options, isItemResponse(isIntegrationSnapshot)),
-			this.ask('intercom.query.getControls', {}, isIntegrationIntercomControls, options),
-			this.ask('intercom.query.listGroups', {}, isIntegrationGroupList, options),
+			this.offers(wireRequests.getControls)
+				? this.ask(wireRequests.getControls, {}, isIntegrationIntercomControls, options)
+				: null,
+			this.offers(wireRequests.listGroups)
+				? this.ask(wireRequests.listGroups, {}, isIntegrationGroupList, options)
+				: null,
 		])
 		const { workspace, entity, participants, statuses, macros } = snapshot.data
 		const entityId = entity.id
@@ -354,18 +462,22 @@ export class CrewLanV2Client {
 		this.statuses = statuses.statuses.map(toPublicStatus)
 		this.participants = new Map(participants.map((participant) => [participant.id, participant.displayIdentity]))
 		this.controls = controls
-		this.groups = groups.groups
+		this.groups = groups?.groups ?? []
+		this.indicatorViews = new Map((statuses.indicators ?? []).map((view) => [view.id, view]))
 		const standing = statuses.entities.find((candidate) => candidate.entityId === entityId)
 
 		return {
 			entityId,
 			workspace: { id: workspace.id, name: workspace.name },
 			entity: { id: entityId, displayName: entity.displayIdentity, position: null },
+			targetKind: entity.kind ?? null,
+			attends: entity.attends ?? null,
 			statuses: this.statuses,
 			status: standing === undefined ? null : toPublicEntityStatus(standing, this.statuses),
-			controls: toPublicControls(entityId, controls),
+			controls: controls === null ? null : toPublicControls(entityId, controls),
 			macros: macros.map((macro) => toPublicMacro(macro, this.mayRunMacros)),
-			intercom: toIntercomState(entityId, groups.groups, controls, this.participants),
+			intercom: this.intercomState(),
+			indicators: this.indicators(),
 		}
 	}
 
@@ -385,9 +497,9 @@ export class CrewLanV2Client {
 		)
 	}
 
-	/** The intercom as the last controls and groups read say, or null before the first snapshot. */
+	/** The intercom as the last controls and groups read say, or null before the first snapshot or without its controls. */
 	intercomState(): IntercomState | null {
-		if (this.entityId === null || this.controls === null || this.groups === null) {
+		if (this.entityId === null || this.controls === null) {
 			return null
 		}
 
@@ -395,7 +507,7 @@ export class CrewLanV2Client {
 	}
 
 	async getEntityControls(entityId: string, options: RequestOptions = {}): Promise<PublicEntityControlsDto> {
-		this.controls = await this.ask('intercom.query.getControls', {}, isIntegrationIntercomControls, options)
+		this.controls = await this.ask(wireRequests.getControls, {}, isIntegrationIntercomControls, options)
 
 		return toPublicControls(entityId, this.controls)
 	}
@@ -430,14 +542,14 @@ export class CrewLanV2Client {
 		body: IntegrationControlsBody,
 		options: RequestOptions = {},
 	): Promise<PublicEntityControlsDto> {
-		this.controls = await this.ask('intercom.command.setControls', body, isIntegrationIntercomControls, options)
+		this.controls = await this.ask(wireRequests.setControls, body, isIntegrationIntercomControls, options)
 
 		return toPublicControls(entityId, this.controls)
 	}
 
 	/** Mutes or unmutes one group, `muted` alone so the level stays, then reads the groups again. */
 	async setListening(groupId: string, muted: boolean, options: RequestOptions = {}): Promise<void> {
-		const answer = await this.ask('intercom.command.setListening', { groupId, muted }, isAnything, options)
+		const answer = await this.ask(wireRequests.setListening, { groupId, muted }, isAnything, options)
 
 		if (isIntegrationGroupList(answer)) {
 			this.groups = answer.groups
@@ -446,7 +558,7 @@ export class CrewLanV2Client {
 
 		const group = typeof answer === 'object' && answer !== null ? (answer as { group?: unknown }).group : undefined
 
-		if (isIntegrationGroupView(group) && this.groups !== null) {
+		if (isIntegrationGroupView(group)) {
 			this.groups = this.groups.map((candidate) => (candidate.id === group.id ? group : candidate))
 			return
 		}
@@ -455,7 +567,7 @@ export class CrewLanV2Client {
 	}
 
 	async readGroups(options: RequestOptions = {}): Promise<void> {
-		this.groups = (await this.ask('intercom.query.listGroups', {}, isIntegrationGroupList, options)).groups
+		this.groups = (await this.ask(wireRequests.listGroups, {}, isIntegrationGroupList, options)).groups
 	}
 
 	async setEntityStatus(
@@ -464,7 +576,7 @@ export class CrewLanV2Client {
 		options: RequestOptions = {},
 	): Promise<SetEntityStatusResult> {
 		const view = await this.ask(
-			'status.command.setEntityStatus',
+			wireRequests.setEntityStatus,
 			{ entityId, statusId: toV2StatusId(statusId) },
 			isIntegrationEntityStatusView,
 			options,
@@ -473,38 +585,119 @@ export class CrewLanV2Client {
 		return { selectedStatusId: toV1StatusId(view.chosenStatusId), status: toPublicEntityStatus(view, this.statuses) }
 	}
 
+	/** Sets a status indicator's status, `statusId` the module's id; answered with the indicators as they stand after it. */
+	async setIndicatorStatus(
+		indicatorId: string,
+		statusId: string,
+		options: RequestOptions = {},
+	): Promise<IndicatorState[]> {
+		const answer = await this.ask(
+			wireRequests.setIndicatorStatus,
+			{ indicatorId, statusId: toV2StatusId(statusId) },
+			isAnything,
+			options,
+		)
+		const indicator =
+			typeof answer === 'object' && answer !== null ? (answer as { indicator?: unknown }).indicator : undefined
+
+		if (isIntegrationIndicatorView(indicator)) {
+			this.indicatorViews.set(indicator.id, indicator)
+		}
+
+		return this.indicators()
+	}
+
+	/**
+	 * What `status.event.indicatorStatusChanged` or `entities.event.indicatorUpdated` says of one
+	 * indicator, an older status than the one held left as it is. True where it changed what is held.
+	 */
+	applyIndicatorEvent(wireId: string, payload: Record<string, unknown>): boolean {
+		const held = (id: unknown) => (typeof id === 'string' ? this.indicatorViews.get(id) : undefined)
+
+		if (wireId === 'entities.event.indicatorUpdated') {
+			if (!isIntegrationIndicatorView(payload.indicator)) {
+				return false
+			}
+
+			this.indicatorViews.set(payload.indicator.id, payload.indicator)
+			return true
+		}
+
+		const current = held(payload.indicatorId)
+
+		if (current === undefined || typeof payload.statusId !== 'string') {
+			return false
+		}
+
+		const since = typeof payload.since === 'string' ? payload.since : null
+
+		if (since !== null && current.since !== undefined && current.since !== null && since < current.since) {
+			return false
+		}
+
+		this.indicatorViews.set(current.id, { ...current, statusId: payload.statusId, since })
+		return true
+	}
+
 	async runMacro(macroId: string, options: RequestOptions = {}): Promise<PublicMacroDto> {
 		return toPublicMacro(
-			await this.ask('macros.command.runMacro', { macroId }, isIntegrationMacroView, options),
+			await this.ask(wireRequests.runMacro, { macroId }, isIntegrationMacroView, options),
 			this.mayRunMacros,
 		)
 	}
 
 	/** Acknowledges every open alert of the Entity's, as v1's dismiss did. */
 	async dismissEntityAlerts(entityId: string, options: RequestOptions = {}): Promise<PublicDismissEntityAlertsDto> {
-		const answer = await this.ask('alerts.command.acknowledgeAlerts', { allOpen: true }, isAcknowledged, options)
+		const answer = await this.ask(wireRequests.acknowledgeAlerts, { allOpen: true }, isAcknowledged, options)
 
 		return { entityId, dismissedCount: answer.acknowledged.length }
 	}
 
 	/**
 	 * The event stream. An event v1 has a shape for reaches `onEvent` in that shape; every other one
-	 * `onIntegrationEvent`; `event: gap` calls `onGap`; `event: ended` ends the stream with
-	 * `endedError` of its code.
+	 * `onIntegrationEvent`; `event: gap` calls `onGap`; `event: attendance` calls `onAttendance`;
+	 * `event: offer` becomes this client's offer, then calls `onOffer`; `event: ended` ends the
+	 * stream with `endedError` of its code. A record of another name is ignored, as the contract
+	 * asks of a v2 reader.
 	 */
 	async streamEvents(options: StreamEventsOptions): Promise<void> {
 		await this.http.openEventStream(`/api/v2/events?types=${integrationEventTypes.join(',')}`, options, (frames) => {
 			for (const frame of frames) {
-				if (frame.event === 'ended') {
-					throw endedError(endedCode(frame.data))
-				}
+				switch (frame.event) {
+					case 'ended':
+						throw endedError(endedCode(frame.data))
+					case 'gap':
+						options.onGap?.()
+						continue
+					case 'attendance': {
+						const attends = recordField(frame.data, 'attends')
 
-				if (frame.event === 'gap') {
-					options.onGap?.()
-					continue
-				}
+						if (typeof attends === 'boolean') {
+							options.onAttendance?.(attends)
+						} else {
+							this.logger.debug(`Ignoring unexpected CrewLAN attendance record: ${truncate(frame.data)}`)
+						}
 
-				this.dispatch(frame.data, options)
+						continue
+					}
+					case 'offer': {
+						const offer = parseRecord(frame.data)
+
+						if (isIntegrationOffer(offer)) {
+							this.applyOffer(offer)
+							options.onOffer?.()
+						} else {
+							this.logger.debug(`Ignoring unexpected CrewLAN offer record: ${truncate(frame.data)}`)
+						}
+
+						continue
+					}
+					case 'message':
+						this.dispatch(frame.data, options)
+						continue
+					default:
+						this.logger.debug(`Ignoring the CrewLAN event-stream record "${frame.event}".`)
+				}
 			}
 		})
 	}
@@ -572,6 +765,15 @@ export class CrewLanV2Client {
 	}
 
 	private async ask<T>(wireId: string, body: object, guard: Guard<T>, options: RequestOptions): Promise<T> {
+		if (!this.offers(wireId)) {
+			throw new CrewLanApiError(
+				`CrewLAN does not offer this connection ${wireId} now, so nothing was sent.`,
+				null,
+				'client',
+				requestNotOfferedCode,
+			)
+		}
+
 		return (
 			await this.http.request(
 				`/api/v2/requests/${encodeURIComponent(wireId)}`,
@@ -583,16 +785,24 @@ export class CrewLanV2Client {
 	}
 }
 
-function endedCode(data: string): string {
+/** A record's `data:` as JSON, or undefined where it is none. */
+function parseRecord(data: string): unknown {
 	try {
-		const parsed: unknown = JSON.parse(data)
-
-		if (typeof parsed === 'object' && parsed !== null && typeof (parsed as { code?: unknown }).code === 'string') {
-			return (parsed as { code: string }).code
-		}
+		return JSON.parse(data)
 	} catch {
-		// An unreadable `ended` still ends the stream.
+		return undefined
 	}
+}
 
-	return 'unknown'
+function recordField(data: string, field: string): unknown {
+	const parsed = parseRecord(data)
+
+	return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>)[field] : undefined
+}
+
+function endedCode(data: string): string {
+	const code = recordField(data, 'code')
+
+	// An unreadable `ended` still ends the stream.
+	return typeof code === 'string' ? code : 'unknown'
 }

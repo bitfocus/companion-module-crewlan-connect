@@ -1,6 +1,13 @@
 import { InstanceBase, InstanceStatus, type InstanceTypes, type SomeCompanionConfigField } from '@companion-module/base'
 import { CrewLanApiClient, CrewLanApiError, isAbortError, type ControlsPatch, type RequestOptions } from './api.js'
-import { CrewLanV2Client, offlineStatusId, probeIntegrationApi, type IntegrationControlsBody } from './api-v2.js'
+import {
+	CrewLanV2Client,
+	isRequestNotOfferedLocally,
+	offlineStatusId,
+	probeIntegrationApi,
+	wireRequests,
+	type IntegrationControlsBody,
+} from './api-v2.js'
 import { UpdateActions, type ActionsSchema } from './actions.js'
 import {
 	GetConfigFields,
@@ -10,7 +17,7 @@ import {
 	type ModuleConfig,
 	type ModuleSecrets,
 } from './config.js'
-import { UpdateFeedbacks, type FeedbacksSchema } from './feedbacks.js'
+import { isOffered, UpdateFeedbacks, type FeedbacksSchema } from './feedbacks.js'
 import {
 	isPublicAlertTriggeredEventData,
 	isPublicEntityControlsDto,
@@ -66,7 +73,7 @@ const talkReleaseRetryDelaysMs = [250, 1000]
 
 export const authenticationFailedConnectionMessage = 'Could not establish a connection because authentication failed.'
 
-type StateGroup = 'connection' | 'status' | 'controls' | 'macros' | 'intercom'
+type StateGroup = 'connection' | 'status' | 'controls' | 'macros' | 'intercom' | 'indicators'
 
 /** What an action that needs `/api/v2` logs over the Public API v1, where it changes nothing. */
 export function needsIntegrationApiMessage(actionName: string): string {
@@ -114,6 +121,8 @@ const feedbackStateGroups: Record<keyof FeedbacksSchema, StateGroup | readonly S
 	call_talk_available: ['connection', 'intercom'],
 	call_talk_active: 'intercom',
 	group_member: ['connection', 'intercom'],
+	indicator_status_is: 'indicators',
+	indicator_ready: ['connection', 'indicators'],
 }
 
 export function feedbackIdsForGroups(groups: ReadonlySet<StateGroup>): (keyof FeedbacksSchema)[] {
@@ -141,6 +150,9 @@ function createInitialState(): CrewLanState {
 		api: null,
 		ownerPresent: true,
 		intercom: null,
+		targetKind: null,
+		requests: null,
+		indicators: [],
 	}
 }
 
@@ -384,6 +396,20 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	 * at the refusal, so a later status is told by CrewLAN's clock, never by this machine's.
 	 */
 	private ownerAbsence: { statusAt: number } | null = null
+	/**
+	 * What CrewLAN last said of whether the connection's target attends, and this machine's time it
+	 * was said at — by the snapshot's `attends` (its time the one it was asked at), the stream's
+	 * `attendance` record, an accepted write or a refusal naming the owner absent. Null where
+	 * CrewLAN says nothing of it (a Workspace predating it, or v1): `ownerAbsence` and the status
+	 * then decide, as before. While it is set it alone decides whether the buttons grey.
+	 */
+	private attendance: { attends: boolean; at: number } | null = null
+	/**
+	 * Per Companion control, the requests its placed actions send, keyed by the action's own id, as
+	 * Companion reports them (`actions.ts` `reportPlacement`). It outlives a connection: the buttons
+	 * do not change when CrewLAN reconnects.
+	 */
+	private placedRequests = new Map<string, Map<string, readonly string[]>>()
 	/** The caller ids whose names the snapshot was read again for, each asked once per connection. */
 	private callerNamesAsked = new Set<string>()
 	private reconnectTimer: NodeJS.Timeout | null = null
@@ -512,6 +538,58 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		return macroId.length > 0 && this.state.macros.some((macro) => macro.id === macroId && macro.running)
 	}
 
+	/** Records that the control `controlId` holds the placed action `actionId`, which sends `requests`. */
+	notePlacedAction(controlId: string, actionId: string, requests: readonly string[]): void {
+		const placed = this.placedRequests.get(controlId) ?? new Map<string, readonly string[]>()
+
+		placed.set(actionId, requests)
+		this.placedRequests.set(controlId, placed)
+		this.recheckReadiness()
+	}
+
+	/** Forgets the placed action `actionId` of the control `controlId`: removed, disabled or edited. */
+	noteRemovedAction(controlId: string, actionId: string): void {
+		const placed = this.placedRequests.get(controlId)
+
+		if (placed === undefined || !placed.delete(actionId)) {
+			return
+		}
+
+		if (placed.size === 0) {
+			this.placedRequests.delete(controlId)
+		}
+
+		this.recheckReadiness()
+	}
+
+	/**
+	 * Whether the offer holds every request the actions placed on `controlId` send. True over v1,
+	 * which says no offer, and for a control the module knows no action of: such a button keeps
+	 * reading ready while it is connected and its target attends, as it did before.
+	 */
+	isControlOffered(controlId: string | undefined): boolean {
+		const placed = controlId === undefined ? undefined : this.placedRequests.get(controlId)
+
+		if (placed === undefined) {
+			return true
+		}
+
+		return [...placed.values()].every((requests) => requests.every((wireId) => isOffered(this.state, wireId)))
+	}
+
+	private recheckReadiness(): void {
+		// Over v1, and before the first offer, every control reads ready whatever it holds.
+		if (this.state.requests === null) {
+			return
+		}
+
+		const [first, ...others] = feedbackIdsForGroups(new Set<StateGroup>(['connection']))
+
+		if (first !== undefined) {
+			this.checkFeedbacks(first, ...others)
+		}
+	}
+
 	// ---------------------------------------------------------------------------
 	// Actions
 	// ---------------------------------------------------------------------------
@@ -584,6 +662,59 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		}
 
 		this.applyStatusUpdate(applied, this.lastLocalWriteAt, { lastError: '' })
+	}
+
+	/**
+	 * Sets a status indicator's status, v2 only. An indicator the offer does not list, or a status it
+	 * does not list for it, is refused here with the reason, and nothing is sent.
+	 */
+	async setIndicatorStatus(indicatorId: string, statusId: string): Promise<void> {
+		const actionName = 'Set Indicator Status'
+		const requestedIndicator = indicatorId.trim()
+		const requestedStatus = statusId.trim()
+		const api = this.requireIntegrationApi(actionName)
+
+		if (api === null) {
+			return
+		}
+
+		if (requestedIndicator.length === 0 || requestedStatus.length === 0) {
+			this.log(
+				'warn',
+				`${actionName}: no status indicator or no status selected. Pick both once the connection is up, or type their ids.`,
+			)
+			return
+		}
+
+		const indicator = this.state.indicators.find((candidate) => candidate.id === requestedIndicator)
+
+		if (indicator === undefined) {
+			this.log(
+				'warn',
+				`${actionName}: CrewLAN does not let this connection set the status indicator "${requestedIndicator}" now, so nothing was sent.`,
+			)
+			return
+		}
+
+		if (!indicator.statusIds.includes(requestedStatus)) {
+			this.log(
+				'warn',
+				`${actionName}: CrewLAN does not let this connection set ${indicator.name} to "${requestedStatus}", so nothing was sent. It may set: ${indicator.statusIds.join(', ')}`,
+			)
+			return
+		}
+
+		this.requireEntityId()
+		const generation = this.generation
+		const indicators = await api.setIndicatorStatus(requestedIndicator, requestedStatus, this.requestOptions())
+
+		if (generation !== this.generation) {
+			return
+		}
+
+		this.lastLocalWriteAt = Date.now()
+		this.notePresent()
+		this.updateState({ indicators, lastError: '' })
 	}
 
 	/**
@@ -962,11 +1093,19 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 				return
 			}
 
-			this.api = description === null ? http : new CrewLanV2Client(http, description, logger)
+			const api = description === null ? http : new CrewLanV2Client(http, description, logger)
+			this.api = api
 			// A connection that has not read its snapshot yet counts its Entity as present.
 			this.ownerAbsence = null
+			this.attendance = null
 			this.callerNamesAsked.clear()
-			this.updateState({ api: description === null ? 'v1' : 'v2', ownerPresent: true })
+			this.updateState({
+				api: description === null ? 'v1' : 'v2',
+				ownerPresent: true,
+				...(api instanceof CrewLanV2Client
+					? { requests: api.offeredRequests(), indicators: api.indicators() }
+					: { requests: null, indicators: [], targetKind: null }),
+			})
 			await this.loadSnapshot(generation, abort.signal)
 		} catch (error) {
 			if (generation !== this.generation || isAbortError(error)) {
@@ -1088,12 +1227,20 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		this.setInstanceStatus(InstanceStatus.Ok)
 	}
 
-	/** The `/api/v2` snapshot: one read of the snapshot, the controls and the groups, in v1's shapes. */
+	/**
+	 * The `/api/v2` snapshot: one read of the snapshot, and of the controls and the groups where the
+	 * offer holds their reads, in v1's shapes. While no stream says the offer, `GET /api/v2` is read
+	 * again first, so a poll never asks for what the connection may no longer read.
+	 */
 	private async loadIntegrationSnapshot(
 		api: CrewLanV2Client,
 		generation: number,
 		options: RequestOptions,
 	): Promise<void> {
+		if (this.state.connected && !this.state.streamConnected) {
+			await api.readOffer(options)
+		}
+
 		const requestedAt = Date.now()
 		const snapshot = await api.loadSnapshot(options)
 
@@ -1101,14 +1248,25 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			return
 		}
 
+		// Another target — the connection given a status indicator — keeps no status or controls of
+		// the one it left.
+		const sameTarget = snapshot.entityId === this.state.entityId
+		const heldStatus = sameTarget ? this.state.status : null
 		const nextStatus =
 			snapshot.status === null
-				? this.state.status
-				: pickFresher(this.state.status, snapshot.status, requestedAt, this.lastLocalWriteAt)
-		const nextControls = pickFresher(this.state.controls, snapshot.controls, requestedAt, this.lastLocalWriteAt)
+				? heldStatus
+				: pickFresher(heldStatus, snapshot.status, requestedAt, this.lastLocalWriteAt)
+		const nextControls =
+			snapshot.controls === null
+				? null
+				: pickFresher(sameTarget ? this.state.controls : null, snapshot.controls, requestedAt, this.lastLocalWriteAt)
 
-		if (nextControls === snapshot.controls) {
+		if (nextControls !== null && nextControls === snapshot.controls) {
 			this.controlsRefreshedAt = Date.now()
+		}
+
+		if (snapshot.attends !== null && (this.attendance === null || requestedAt >= this.attendance.at)) {
+			this.attendance = { attends: snapshot.attends, at: requestedAt }
 		}
 
 		this.groupsRefreshedAt = Date.now()
@@ -1117,6 +1275,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			entityId: snapshot.entityId,
 			workspace: snapshot.workspace,
 			entity: snapshot.entity,
+			targetKind: snapshot.targetKind,
 			statuses: snapshot.statuses,
 			// A run event after this snapshot was asked for knows better whether the macro runs.
 			macros: this.mergeMacros(snapshot.macros, requestedAt).map((macro) => {
@@ -1126,11 +1285,14 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 					? { ...macro, running: held.running }
 					: macro
 			}),
-			macrosSupported: true,
+			macrosSupported: api.offers(wireRequests.listMacros),
 			status: nextStatus,
 			controls: nextControls,
 			intercom: snapshot.intercom,
 			ownerPresent: this.presenceFrom(nextStatus),
+			// The offer as it stands now: an `offer` record may have arrived while the snapshot was read.
+			requests: api.offeredRequests(),
+			indicators: api.indicators(),
 			lastError: '',
 		})
 		this.setInstanceStatus(InstanceStatus.Ok)
@@ -1183,6 +1345,16 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 						this.notePresentByStream()
 						this.log('debug', 'CrewLAN event stream missed events; reading the Workspace again.')
 						this.schedulePoll(generation, 0)
+					}
+				},
+				onAttendance: (attends) => {
+					if (generation === this.generation) {
+						this.applyAttendance(attends)
+					}
+				},
+				onOffer: () => {
+					if (generation === this.generation && api instanceof CrewLanV2Client) {
+						this.applyOffer(api, generation)
 					}
 				},
 			})
@@ -1468,6 +1640,10 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			case 'intercom.event.memberRemoved':
 				void this.refreshIntercom(generation, 'groups')
 				return
+			case 'status.event.indicatorStatusChanged':
+			case 'entities.event.indicatorUpdated':
+				this.applyIndicatorEvent(event, generation)
+				return
 			case 'status.event.statusDefined':
 			case 'status.event.statusUpdated':
 			case 'status.event.statusRemoved':
@@ -1479,6 +1655,43 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			default:
 				this.log('debug', `Ignoring CrewLAN event "${event.wireId}".`)
 		}
+	}
+
+	/**
+	 * The stream's `attendance` record: the buttons grey the moment the target stops attending and
+	 * come back the moment it attends again, with no grace.
+	 */
+	private applyAttendance(attends: boolean): void {
+		this.attendance = { attends, at: Date.now() }
+		this.ownerAbsence = null
+
+		if (this.state.ownerPresent !== attends) {
+			this.log('debug', attends ? 'CrewLAN: the target attends again.' : 'CrewLAN: the target attends at no Client.')
+			this.updateState({ ownerPresent: attends })
+		}
+	}
+
+	/**
+	 * The stream's `offer` record, already the client's: a button whose request left the offer greys
+	 * at once, and the snapshot is read again for what the new offer shows — a newly settable
+	 * indicator's name, the macros' `runnable`, the controls a newly offered read returns.
+	 */
+	private applyOffer(api: CrewLanV2Client, generation: number): void {
+		const requests = api.offeredRequests()
+		const indicators = api.indicators()
+		const offered = (list: CrewLanState['indicators']) => list.map((indicator) => [indicator.id, indicator.statusIds])
+
+		if (sameJson(requests, this.state.requests) && sameJson(offered(indicators), offered(this.state.indicators))) {
+			return
+		}
+
+		this.log('debug', 'CrewLAN changed what this connection may do; reading the Workspace again.')
+		this.updateState({
+			requests,
+			indicators,
+			...(api.offers(wireRequests.getControls) ? {} : { controls: null, intercom: null }),
+		})
+		this.schedulePoll(generation, 0)
 	}
 
 	private setMacroRunning(macroId: string, running: boolean): void {
@@ -1493,11 +1706,34 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		this.updateState({ macros: this.state.macros.with(index, { ...current, running }) })
 	}
 
+	/**
+	 * An indicator's status or name, as its event says: applied where the module holds it, and read
+	 * with the snapshot where the offer lists one the module has not read yet.
+	 */
+	private applyIndicatorEvent(event: IntegrationEventEnvelope, generation: number): void {
+		const api = this.api
+
+		if (!(api instanceof CrewLanV2Client)) {
+			return
+		}
+
+		if (api.applyIndicatorEvent(event.wireId, event.payload)) {
+			this.updateState({ indicators: api.indicators() })
+		} else if (api.hasUnnamedIndicators()) {
+			this.schedulePoll(generation, 0)
+		}
+	}
+
 	/** Reads the controls or the groups again after their event; a failure waits for the next poll. */
 	private async refreshIntercom(generation: number, part: 'controls' | 'groups'): Promise<void> {
 		const api = this.api
 
 		if (!(api instanceof CrewLanV2Client) || this.state.entityId === null || !this.state.connected) {
+			return
+		}
+
+		// A connection whose offer holds no such read — one acting for a status indicator — reads nothing.
+		if (!api.offers(part === 'controls' ? wireRequests.getControls : wireRequests.listGroups)) {
 			return
 		}
 
@@ -1589,20 +1825,28 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	}
 
 	/**
-	 * The v2 stream is silent while the Entity is present at no Client, so every frame on it — an
-	 * event of any kind, a `gap` — says it is. A v1 stream speaks regardless and says nothing.
+	 * The v2 stream holds its events back while the Entity is present at no Client, so every event
+	 * frame on it, and a `gap`, says it is. A v1 stream speaks regardless and says nothing; a stream
+	 * that says `attendance` says it directly, and its word alone counts.
 	 */
 	private notePresentByStream(): void {
-		if (this.api instanceof CrewLanV2Client) {
+		if (this.api instanceof CrewLanV2Client && this.attendance === null) {
 			this.notePresent()
 		}
 	}
 
-	/** A sign the Entity is present at a Client again: the buttons stop being held grey. */
+	/**
+	 * A sign the Entity is present at a Client again — an accepted write, which CrewLAN refuses while
+	 * it is absent: the buttons stop being held grey.
+	 */
 	private notePresent(): void {
 		this.ownerAbsence = null
 
-		if (!this.state.ownerPresent && isEntityPresent(this.state.status)) {
+		if (this.attendance !== null) {
+			this.attendance = { attends: true, at: Date.now() }
+		}
+
+		if (!this.state.ownerPresent && (this.attendance !== null || isEntityPresent(this.state.status))) {
 			this.updateState({ ownerPresent: true })
 		}
 	}
@@ -1613,6 +1857,11 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	 * between the refusal and that moment still shows the chosen one.
 	 */
 	private presenceFrom(status: PublicEntityStatusDto | null): boolean {
+		// CrewLAN's own word, where it says one, is the measure; the status is a guess 15 s late.
+		if (this.attendance !== null) {
+			return this.attendance.attends
+		}
+
 		if (!isEntityPresent(status)) {
 			return false
 		}
@@ -1631,9 +1880,13 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		return false
 	}
 
-	/** Holds the buttons grey after an owner-absent refusal; see `ownerAbsence`. */
+	/** Holds the buttons grey after an owner-absent refusal; see `ownerAbsence` and `attendance`. */
 	private noteAbsent(message: string): void {
 		const statusAt = Date.parse(this.state.status?.updatedAt ?? '')
+
+		if (this.attendance !== null) {
+			this.attendance = { attends: false, at: Date.now() }
+		}
 
 		this.ownerAbsence = { statusAt: Number.isFinite(statusAt) ? statusAt : Number.NEGATIVE_INFINITY }
 		this.updateState({ lastError: message, ownerPresent: false })
@@ -1688,8 +1941,9 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		const intercom =
 			this.api instanceof CrewLanV2Client && next === controls ? { intercom: this.api.intercomState() } : {}
 
-		// An audio connection is a Client of the Entity attached: a sign of presence.
-		if (intercom.intercom?.audioConnected === true) {
+		// An audio connection is a Client of the Entity attached: a sign of presence, where CrewLAN
+		// does not say attendance itself — an audio connection can outlast the Client's channel.
+		if (intercom.intercom?.audioConnected === true && this.attendance === null) {
 			this.notePresent()
 		}
 
@@ -1866,7 +2120,9 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			} catch (error) {
 				lastError = error
 
-				if (isAbortError(error)) {
+				// A release the offer no longer holds is refused here, before anything is sent: a retry
+				// would only be refused again.
+				if (isAbortError(error) || isRequestNotOfferedLocally(error)) {
 					break
 				}
 
@@ -2007,6 +2263,9 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		return JSON.stringify({
 			// Over v1 the Intercom presets hold the one Talk and Output; over v2 one set per group.
 			api: this.state.api,
+			// Over v2 the presets offered are those whose requests the offer holds.
+			requests: this.state.requests,
+			indicators: this.state.indicators.map((indicator) => [indicator.id, indicator.name, indicator.statusIds]),
 			groups: (this.state.intercom?.groups ?? []).map((group) => [group.id, group.name]),
 			statuses: this.getSelectableStatuses().map((status) => [
 				status.id,
@@ -2040,9 +2299,14 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		if (
 			previous.connected !== next.connected ||
 			previous.ownerPresent !== next.ownerPresent ||
-			previous.api !== next.api
+			previous.api !== next.api ||
+			!sameJson(previous.requests, next.requests)
 		) {
 			changed.add('connection')
+		}
+
+		if (!sameJson(previous.indicators, next.indicators)) {
+			changed.add('indicators')
 		}
 
 		if (!sameJson(previous.intercom, next.intercom)) {

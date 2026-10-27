@@ -217,6 +217,20 @@ export interface CrewLanState {
 	ownerPresent: boolean
 	/** What `/api/v2` says of the intercom beyond the one talk and mute; null over v1 or before the first read. */
 	intercom: IntercomState | null
+	/**
+	 * What the connection's target is, as the `/api/v2` snapshot says: `identity`, a participant, or
+	 * `indicator`, a status indicator; null over v1, before the first snapshot, or from a CrewLAN
+	 * whose snapshot does not say.
+	 */
+	targetKind: string | null
+	/**
+	 * The wire ids of every request this connection may make now, as `GET /api/v2` and the stream's
+	 * `offer` records say; null over v1, which says nothing of it. An action whose request is not
+	 * among them is refused before anything is sent, and its button greys.
+	 */
+	requests: string[] | null
+	/** Every status indicator this connection may set now, in CrewLAN's order (v2 only). */
+	indicators: IndicatorState[]
 }
 
 /** Which CrewLAN API a connection speaks: the integration API `/api/v2`, or the Public API v1. */
@@ -236,6 +250,18 @@ export interface IntercomGroupState {
 	talkHeld: boolean
 	/** How it is held while `talkHeld`: `push` or `latch`; null while it is not held. */
 	talkKey: 'push' | 'latch' | null
+}
+
+/** A status indicator this connection may set now, with the statuses it may set it to (v2 only). */
+export interface IndicatorState {
+	/** `ind-` and 32 hexadecimal digits. */
+	id: string
+	/** Its *Name · Role*, or its id where the snapshot did not carry it. */
+	name: string
+	/** The statuses this connection may set it to, as the module's status ids (`sys-green`, a custom id). */
+	statusIds: string[]
+	/** The status it stands at, as the module's status id; null where it is not known yet. */
+	statusId: string | null
 }
 
 /** A participant a direct call names, with the name CrewLAN shows for them. */
@@ -277,12 +303,36 @@ export interface CrewLanChoice {
  * The same two rules hold: a field `guards.ts` does not check is optional here.
  */
 
-/** `GET /api/v2`: what this connection may ask and which events its stream may carry. */
-export interface IntegrationDescription {
-	api: 'v2'
+/**
+ * What this connection may do now: `GET /api/v2` answers it, and the stream's `offer` record says
+ * it again each time it changes.
+ */
+export interface IntegrationOffer {
 	requests: Array<{ wireId: string; kind?: string }>
+	/** Absent from a CrewLAN that predates it, which reads as no indicator this connection may set. */
+	indicators?: IntegrationIndicatorOffer[]
+}
+
+/** One status indicator this connection may set now, with the v2 status ids it may set it to. */
+export interface IntegrationIndicatorOffer {
+	indicatorId: string
+	statusIds: string[]
+}
+
+/** `GET /api/v2`: what this connection may ask and which events its stream may carry. */
+export interface IntegrationDescription extends IntegrationOffer {
+	api: 'v2'
 	/** Not validated and unread: the module subscribes by name, and an unknown one is ignored. */
 	events?: string[]
+}
+
+/** One status indicator as `status.query.listStatuses` and its events answer it, the parts the module reads. */
+export interface IntegrationIndicatorView {
+	id: string
+	displayIdentity: string
+	statusId: string
+	/** Not validated; read only as the status's freshness. */
+	since?: string | null
 }
 
 /** One status of `status.query.listStatuses`: a built-in status's word, or a custom status's id. */
@@ -324,9 +374,18 @@ export interface IntegrationMacroView {
 /** `GET /api/v2/snapshot`, the parts the module reads. */
 export interface IntegrationSnapshot {
 	workspace: { id: string | null; name: string; timeZone?: string }
-	entity: { id: string; displayIdentity: string; protected?: boolean }
+	/**
+	 * The connection's target. `kind` and `attends` are absent from a CrewLAN that predates them:
+	 * the module then judges attendance by the status and the refusals, as before.
+	 */
+	entity: { id: string; displayIdentity: string; protected?: boolean; kind?: string; attends?: boolean }
 	participants: Array<{ id: string; displayIdentity: string; held?: boolean }>
-	statuses: { statuses: IntegrationStatusView[]; entities: IntegrationEntityStatusView[] }
+	statuses: {
+		statuses: IntegrationStatusView[]
+		entities: IntegrationEntityStatusView[]
+		/** Absent from a CrewLAN that predates status indicators, which reads as none. */
+		indicators?: IntegrationIndicatorView[]
+	}
 	macros: IntegrationMacroView[]
 }
 

@@ -123,6 +123,10 @@ export interface StreamEventsOptions {
 	onIntegrationEvent?: (event: IntegrationEventEnvelope) => void
 	/** `/api/v2` only: the stream missed events (`event: gap`); the caller reads its state again. */
 	onGap?: () => void
+	/** `/api/v2` only: whether the connection's target attends now (`event: attendance`). */
+	onAttendance?: (attends: boolean) => void
+	/** `/api/v2` only: what the connection may do changed (`event: offer`), already taken by the client. */
+	onOffer?: () => void
 	/**
 	 * Abort the stream when no bytes (events or keepalive comments) arrived for this long.
 	 * 0 disables the watchdog.

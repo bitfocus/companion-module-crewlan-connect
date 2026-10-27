@@ -8,12 +8,15 @@ import {
 	CrewLanV2Client,
 	endedError,
 	foregroundFor,
+	isRequestNotOfferedLocally,
 	probeIntegrationApi,
+	toIndicatorStates,
 	toIntercomState,
 	toPublicControls,
 	toPublicStatus,
 	toV1StatusId,
 	toV2StatusId,
+	wireRequests,
 } from '../src/api-v2.js'
 import {
 	computeReconnectDelayMs,
@@ -29,6 +32,9 @@ import type {
 } from '../src/types.js'
 
 const silent = { debug: () => undefined, warn: () => undefined }
+
+/** Every request the module makes, offered: an identity target with full access. */
+const everyRequest = Object.values(wireRequests).map((wireId) => ({ wireId }))
 
 const controls: IntegrationIntercomControls = {
 	inputMuted: false,
@@ -239,7 +245,7 @@ describe('v2 client against a fake /api/v2', () => {
 						response.end('<!doctype html><title>Proxy</title>')
 					} else {
 						json(200, {
-							data: { api: 'v2', limits: {}, requests: [{ wireId: 'macros.command.runMacro' }], events: [] },
+							data: { api: 'v2', limits: {}, requests: everyRequest, events: [] },
 						})
 					}
 					return
@@ -318,7 +324,7 @@ describe('v2 client against a fake /api/v2', () => {
 
 	it('sends each write as its request body', async () => {
 		const http1 = new CrewLanApiClient({ baseUrl, token: 'con_test', logger: silent })
-		const client = new CrewLanV2Client(http1, { api: 'v2', requests: [] }, silent)
+		const client = new CrewLanV2Client(http1, { api: 'v2', requests: everyRequest }, silent)
 		recorded.length = 0
 
 		const status = await client.setEntityStatus('ent-1', 'sys-yellow')
@@ -347,10 +353,65 @@ describe('v2 client against a fake /api/v2', () => {
 		assert.ok(recorded.every((entry) => entry.method === 'POST'))
 	})
 
+	it('refuses a request its offer does not hold before sending it, and follows a new offer', async () => {
+		const client = new CrewLanV2Client(
+			new CrewLanApiClient({ baseUrl, token: 'con_test', logger: silent }),
+			{ api: 'v2', requests: [{ wireId: wireRequests.setIndicatorStatus }] },
+			silent,
+		)
+		recorded.length = 0
+
+		assert.equal(client.offers(wireRequests.setControls), false)
+		await assert.rejects(client.setControls('ent-1', { inputMuted: true }), (error: unknown) => {
+			assert.ok(isRequestNotOfferedLocally(error))
+			assert.equal(statusForError(error), InstanceStatus.ConnectionFailure)
+			assert.match(
+				(error as Error).message,
+				/^CrewLAN does not offer this connection intercom\.command\.setControls now, so nothing was sent\.$/,
+			)
+			return true
+		})
+		assert.equal(recorded.length, 0)
+
+		client.applyOffer({ requests: [{ wireId: wireRequests.setControls }] })
+		await client.setControls('ent-1', { inputMuted: true })
+		assert.deepEqual(
+			recorded.map((entry) => entry.path),
+			['/api/v2/requests/intercom.command.setControls'],
+		)
+		assert.equal(client.offers(wireRequests.setIndicatorStatus), false)
+	})
+
+	it('names and stands each offered indicator as the snapshot and its events say', () => {
+		const indicatorId = 'ind-0123456789abcdef0123456789abcdef'
+		const views = new Map([
+			[indicatorId, { id: indicatorId, displayIdentity: 'Stage door · Light', statusId: 'ready', since: null }],
+		])
+
+		assert.deepEqual(
+			toIndicatorStates(
+				[
+					{ indicatorId, statusIds: ['ready', 'attention'] },
+					{ indicatorId: 'ind-ffffffffffffffffffffffffffffffff', statusIds: ['standby'] },
+				],
+				views,
+			),
+			[
+				{ id: indicatorId, name: 'Stage door · Light', statusIds: ['sys-green', 'sys-yellow'], statusId: 'sys-green' },
+				{
+					id: 'ind-ffffffffffffffffffffffffffffffff',
+					name: 'ind-ffffffffffffffffffffffffffffffff',
+					statusIds: ['sys-idle'],
+					statusId: null,
+				},
+			],
+		)
+	})
+
 	it('carries the refusal code, so an absent owner is told apart', async () => {
 		const client = new CrewLanV2Client(
 			new CrewLanApiClient({ baseUrl, token: 'con_test', logger: silent }),
-			{ api: 'v2', requests: [] },
+			{ api: 'v2', requests: everyRequest },
 			silent,
 		)
 
@@ -360,18 +421,22 @@ describe('v2 client against a fake /api/v2', () => {
 	it('hands on v1-shaped events, the others, a gap, and ends on event: ended', async () => {
 		const client = new CrewLanV2Client(
 			new CrewLanApiClient({ baseUrl, token: 'con_test', logger: silent }),
-			{ api: 'v2', requests: [] },
+			{ api: 'v2', requests: everyRequest },
 			silent,
 		)
 		const translated: PublicEventEnvelope[] = []
 		const other: IntegrationEventEnvelope[] = []
+		const attendance: boolean[] = []
 		let gaps = 0
+		let offers = 0
 		const abort = new AbortController()
 		const stream = client.streamEvents({
 			signal: abort.signal,
 			onEvent: (event) => translated.push(event),
 			onIntegrationEvent: (event) => other.push(event),
 			onGap: () => (gaps += 1),
+			onAttendance: (attends) => attendance.push(attends),
+			onOffer: () => (offers += 1),
 		})
 
 		while (streamResponse === null) {
@@ -384,6 +449,13 @@ describe('v2 client against a fake /api/v2', () => {
 		streamResponse.write(envelope('macros.event.macroRunStarted', { macroId: 'mac-2', runId: 'run-1' }))
 		streamResponse.write(envelope('alerts.event.alertRaised', { alertId: 'alr-1', entityId: 'ent-1' }))
 		streamResponse.write('event: gap\ndata: {}\n\n')
+		streamResponse.write('event: attendance\ndata: {"attends":false}\n\n')
+		streamResponse.write(
+			`event: offer\ndata: ${JSON.stringify({ requests: [{ wireId: wireRequests.setIndicatorStatus, kind: 'command' }], indicators: [{ indicatorId: 'ind-0123456789abcdef0123456789abcdef', statusIds: ['ready'] }] })}\n\n`,
+		)
+		// A record of a name the module does not know is ignored, as the contract asks.
+		streamResponse.write('event: something-new\ndata: {"x":1}\n\n')
+		streamResponse.write('event: attendance\ndata: {"attends":true}\n\n')
 		streamResponse.write('event: ended\ndata: {"code":"connection_paused"}\n\n')
 
 		await assert.rejects(stream, (error: unknown) => statusForError(error) === InstanceStatus.AuthenticationFailure)
@@ -399,6 +471,13 @@ describe('v2 client against a fake /api/v2', () => {
 			['macros.event.macroRunStarted'],
 		)
 		assert.equal(gaps, 1)
+		assert.deepEqual(attendance, [false, true])
+		assert.equal(offers, 1)
+		assert.deepEqual(client.offeredRequests(), [wireRequests.setIndicatorStatus])
+		assert.deepEqual(
+			client.indicators().map((indicator) => [indicator.id, indicator.statusIds]),
+			[['ind-0123456789abcdef0123456789abcdef', ['sys-green']]],
+		)
 		assert.ok(recorded.some((entry) => entry.path.startsWith('/api/v2/events?types=status.event.entityStatusChanged,')))
 		abort.abort()
 		streamResponse = null

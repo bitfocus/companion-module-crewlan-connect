@@ -5,8 +5,11 @@ import type {
 	IntegrationEventEnvelope,
 	IntegrationGroupList,
 	IntegrationGroupView,
+	IntegrationIndicatorOffer,
+	IntegrationIndicatorView,
 	IntegrationIntercomControls,
 	IntegrationMacroView,
+	IntegrationOffer,
 	IntegrationSnapshot,
 	IntegrationStatusView,
 	PublicAlertTriggeredEventData,
@@ -203,12 +206,28 @@ function isIntegrationDirectCall(value: unknown): value is IntegrationDirectCall
 	)
 }
 
-export function isIntegrationDescription(value: unknown): value is IntegrationDescription {
+export function isIntegrationIndicatorOffer(value: unknown): value is IntegrationIndicatorOffer {
+	return isRecord(value) && isString(value.indicatorId) && isArrayOf(value.statusIds, isString)
+}
+
+/** `GET /api/v2`'s `requests` and `indicators`, and the stream's `offer` record, which carries those two alone. */
+export function isIntegrationOffer(value: unknown): value is IntegrationOffer {
 	return (
 		isRecord(value) &&
-		value.api === 'v2' &&
-		isArrayOf(value.requests, (request): request is { wireId: string } => isRecord(request) && isString(request.wireId))
+		isArrayOf(
+			value.requests,
+			(request): request is { wireId: string } => isRecord(request) && isString(request.wireId),
+		) &&
+		(value.indicators === undefined || isArrayOf(value.indicators, isIntegrationIndicatorOffer))
 	)
+}
+
+export function isIntegrationDescription(value: unknown): value is IntegrationDescription {
+	return isRecord(value) && value.api === 'v2' && isIntegrationOffer(value)
+}
+
+export function isIntegrationIndicatorView(value: unknown): value is IntegrationIndicatorView {
+	return isRecord(value) && isString(value.id) && isString(value.displayIdentity) && isString(value.statusId)
 }
 
 export function isIntegrationStatusView(value: unknown): value is IntegrationStatusView {
@@ -246,6 +265,8 @@ export function isIntegrationSnapshot(value: unknown): value is IntegrationSnaps
 		isRecord(value.entity) &&
 		isString(value.entity.id) &&
 		isString(value.entity.displayIdentity) &&
+		(value.entity.kind === undefined || isString(value.entity.kind)) &&
+		(value.entity.attends === undefined || isBoolean(value.entity.attends)) &&
 		isArrayOf(
 			value.participants,
 			(participant): participant is { id: string; displayIdentity: string } =>
@@ -254,6 +275,7 @@ export function isIntegrationSnapshot(value: unknown): value is IntegrationSnaps
 		isRecord(value.statuses) &&
 		isArrayOf(value.statuses.statuses, isIntegrationStatusView) &&
 		isArrayOf(value.statuses.entities, isIntegrationEntityStatusView) &&
+		(value.statuses.indicators === undefined || isArrayOf(value.statuses.indicators, isIntegrationIndicatorView)) &&
 		isArrayOf(value.macros, isIntegrationMacroView)
 	)
 }

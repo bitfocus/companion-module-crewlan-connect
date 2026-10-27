@@ -3,8 +3,10 @@ import { describe, it } from 'node:test'
 import type { CompanionButtonStyleProps, CompanionPresetDefinitions } from '@companion-module/base'
 import type ModuleInstance from '../src/main.js'
 import type { ModuleSchema } from '../src/main.js'
+import { actionRequests } from '../src/actions.js'
+import { wireRequests } from '../src/api-v2.js'
 import { offlineBackgroundColor, offlineTextColor } from '../src/button-style.js'
-import { UpdateFeedbacks } from '../src/feedbacks.js'
+import { isOffered, UpdateFeedbacks } from '../src/feedbacks.js'
 import { UpdatePresets } from '../src/presets.js'
 import type { CrewLanApiVersion, CrewLanState, PublicStatusDto } from '../src/types.js'
 
@@ -67,6 +69,9 @@ function litState(api: CrewLanApiVersion): CrewLanState {
 		lastError: '',
 		api,
 		ownerPresent: true,
+		targetKind: null,
+		requests: null,
+		indicators: [],
 		intercom:
 			api === 'v1'
 				? null
@@ -94,9 +99,16 @@ function litState(api: CrewLanApiVersion): CrewLanState {
 	}
 }
 
-type Definitions = Record<string, { callback: (feedback: { options: Record<string, unknown> }) => unknown }>
+type Definitions = Record<
+	string,
+	{ callback: (feedback: { options: Record<string, unknown>; controlId?: string }) => unknown }
+>
 
-/** The module's feedbacks and presets, built once against `state`, which a test then changes. */
+/**
+ * The module's feedbacks and presets, built once against `state`, which a test then changes. Each
+ * preset is placed as the control named by its id, holding the actions of its steps, as Companion
+ * reports them to the module.
+ */
 function harness(state: CrewLanState): {
 	definitions: Definitions
 	presets: CompanionPresetDefinitions<ModuleSchema>
@@ -106,6 +118,12 @@ function harness(state: CrewLanState): {
 	const self = {
 		label: 'crewlan',
 		getCrewLanState: () => state,
+		isControlOffered: (controlId: string | undefined) => {
+			const preset = controlId === undefined ? undefined : presets?.[controlId]
+			const actions = preset?.type === 'simple' ? preset.steps.flatMap((step) => [...step.down, ...step.up]) : []
+
+			return actions.every((action) => actionRequests[action.actionId].every((wireId) => isOffered(state, wireId)))
+		},
 		getStatusChoices: () => [],
 		getDefaultStatusChoice: () => '',
 		getMacroChoices: () => [],
@@ -143,7 +161,7 @@ function looks(built: ReturnType<typeof harness>): Record<string, Partial<Compan
 		for (const feedback of preset.feedbacks) {
 			const definition = built.definitions[feedback.feedbackId]
 			assert.ok(definition, feedback.feedbackId)
-			const value = definition.callback({ options: feedback.options }) === true
+			const value = definition.callback({ options: feedback.options, controlId: id }) === true
 
 			if (value !== (feedback.isInverted === true)) {
 				style = { ...style, ...feedback.style }
@@ -294,5 +312,63 @@ describe('the final look over v2 in the intercom', () => {
 		}
 
 		assert.equal(isGrey(final.group_everyone_mute), false)
+	})
+})
+
+describe('the final look over v2 as the offer says', () => {
+	const indicatorId = 'ind-0123456789abcdef0123456789abcdef'
+	const indicatorPreset = `indicator_${indicatorId}_sys-green`
+	const everyRequest = Object.values(wireRequests)
+
+	it('greys every placed key whose request leaves the offer, and only those', () => {
+		const state = litState('v2')
+		state.requests = everyRequest
+		const built = harness(state)
+		state.requests = everyRequest.filter((wireId) => wireId !== wireRequests.setControls)
+		const final = looks(built)
+		const lit = [
+			'status_sys-green',
+			'macro_macro-show',
+			'dismiss_alerts',
+			...v2Presets.filter((id) => id.endsWith('_mute')),
+		]
+
+		for (const id of v2Presets) {
+			assert.equal(isGrey(final[id]), !lit.includes(id), id)
+		}
+	})
+
+	it("lights an indicator's key at its status, dims it at another, and greys it where the offer withdrew it", () => {
+		const state = litState('v2')
+		state.requests = everyRequest
+		state.indicators = [{ id: indicatorId, name: 'Stage door', statusIds: ['sys-green'], statusId: 'sys-green' }]
+		const built = harness(state)
+		const preset = built.presets[indicatorPreset]
+		assert.ok(preset)
+		assert.equal(preset.style.text, 'Stage door\nReady')
+
+		assert.equal(looks(built)[indicatorPreset]?.bgcolor, 0x0fcf29)
+		state.indicators = [{ ...state.indicators[0]!, statusId: 'sys-yellow' }]
+		assert.equal(isGrey(looks(built)[indicatorPreset]), false)
+		assert.notEqual(looks(built)[indicatorPreset]?.bgcolor, 0x0fcf29)
+		state.indicators = [{ ...state.indicators[0]!, statusIds: [] }]
+		assert.equal(isGrey(looks(built)[indicatorPreset]), true)
+		state.indicators = []
+		assert.equal(isGrey(looks(built)[indicatorPreset]), true)
+		state.indicators = [{ id: indicatorId, name: 'Stage door', statusIds: ['sys-green'], statusId: null }]
+		state.ownerPresent = false
+		assert.equal(isGrey(looks(built)[indicatorPreset]), true)
+	})
+
+	it('offers a connection acting for a status indicator its keys alone', () => {
+		const state = litState('v2')
+		state.targetKind = 'indicator'
+		state.requests = [wireRequests.setIndicatorStatus, 'status.query.listStatuses']
+		state.indicators = [{ id: indicatorId, name: 'Stage door', statusIds: ['sys-green'], statusId: 'sys-green' }]
+		state.macros = []
+		state.intercom = null
+		state.controls = null
+
+		assert.deepEqual(Object.keys(harness(state).presets), [indicatorPreset])
 	})
 })

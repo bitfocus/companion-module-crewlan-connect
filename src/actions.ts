@@ -1,4 +1,9 @@
-import type { CompanionInputFieldDropdown } from '@companion-module/base'
+import type {
+	CompanionActionDefinitions,
+	CompanionActionInfo,
+	CompanionInputFieldDropdown,
+} from '@companion-module/base'
+import { wireRequests } from './api-v2.js'
 import { macroIdRegex, statusIdRegex } from './config.js'
 import type ModuleInstance from './main.js'
 
@@ -82,6 +87,87 @@ export type ActionsSchema = {
 	call_hang_up: {
 		options: Record<string, never>
 	}
+	set_indicator_status: {
+		options: {
+			indicatorId: string
+			statusId: string
+		}
+	}
+}
+
+/**
+ * The `/api/v2` request each action sends. A button holding an action whose request the
+ * connection's offer does not hold now reads not ready, so its readiness feedback greys it; the
+ * action itself is refused before anything is sent. *Refresh* sends none. Over v1, which says no
+ * offer, every button reads ready as before.
+ */
+export const actionRequests: Readonly<Record<keyof ActionsSchema, readonly string[]>> = {
+	set_status: [wireRequests.setEntityStatus],
+	listen_mute: [wireRequests.setControls],
+	talk_push_down: [wireRequests.setControls],
+	talk_push_up: [wireRequests.setControls],
+	talk_latch: [wireRequests.setControls],
+	dismiss_alerts: [wireRequests.acknowledgeAlerts],
+	refresh: [],
+	run_macro: [wireRequests.runMacro],
+	input_mute: [wireRequests.setControls],
+	group_talk_push_down: [wireRequests.setControls],
+	group_talk_push_up: [wireRequests.setControls],
+	group_talk_latch: [wireRequests.setControls],
+	group_mute: [wireRequests.setListening],
+	call_answer: [wireRequests.setControls],
+	call_talk_push_down: [wireRequests.setControls],
+	call_talk_push_up: [wireRequests.setControls],
+	call_talk_latch: [wireRequests.setControls],
+	call_hang_up: [wireRequests.setControls],
+	set_indicator_status: [wireRequests.setIndicatorStatus],
+}
+
+/** Regex string (Companion format) for a typed status indicator id: `ind-` and 32 hex digits. */
+export const indicatorIdRegex = '/^ind-[0-9a-f]{32}$/'
+
+/**
+ * The indicator picker shared by the indicator action and feedbacks: the status indicators this
+ * connection may set now. A typed id is accepted, so a button survives a list not yet loaded.
+ */
+export function indicatorOption(self: ModuleInstance): CompanionInputFieldDropdown<'indicatorId', string> {
+	const choices = self.getCrewLanState().indicators.map((indicator) => ({ id: indicator.id, label: indicator.name }))
+
+	return {
+		id: 'indicatorId',
+		type: 'dropdown',
+		label: 'Status indicator',
+		default: choices[0]?.id ?? '',
+		choices: choices.length > 0 ? choices : [{ id: '', label: '— no status indicator this connection may set —' }],
+		allowCustom: true,
+		regex: indicatorIdRegex,
+		tooltip: 'Pick a status indicator, or type its id to configure the button before the connection is up.',
+		description: 'Indicator ids can be typed, so buttons can be built before the connection is up.',
+	}
+}
+
+/**
+ * Tells the module which control holds which action, so a readiness feedback on that control knows
+ * the requests its button sends. Companion reports every placed action this way when the module
+ * starts and whenever a button is edited.
+ */
+function reportPlacement(
+	self: ModuleInstance,
+	definitions: CompanionActionDefinitions<ActionsSchema>,
+): CompanionActionDefinitions<ActionsSchema> {
+	for (const actionId of Object.keys(definitions) as (keyof ActionsSchema)[]) {
+		const definition = definitions[actionId]
+
+		if (definition) {
+			definition.optionsToMonitorForSubscribe = []
+			definition.skipUnsubscribeOnOptionsChange = true
+			definition.subscribe = (action: CompanionActionInfo) =>
+				self.notePlacedAction(action.controlId, action.id, actionRequests[actionId])
+			definition.unsubscribe = (action: CompanionActionInfo) => self.noteRemovedAction(action.controlId, action.id)
+		}
+	}
+
+	return definitions
 }
 
 /** Regex string (Companion format) for a typed intercom group id: `everyone`, or `grp-` and 32 hex digits. */
@@ -117,7 +203,7 @@ function asLatchMode(value: unknown): LatchMode {
 }
 
 export function UpdateActions(self: ModuleInstance): void {
-	self.setActionDefinitions({
+	const definitions: CompanionActionDefinitions<ActionsSchema> = {
 		set_status: {
 			name: 'Set My Status',
 			description: 'Sets the status of the entity this connection is bound to.',
@@ -399,6 +485,30 @@ export function UpdateActions(self: ModuleInstance): void {
 				})
 			},
 		},
+		set_indicator_status: {
+			name: 'Set Indicator Status',
+			description:
+				'Sets a status indicator this connection may set to one of the statuses it may set it to, as CrewLAN says. Needs a Workspace serving /api/v2.',
+			options: [
+				indicatorOption(self),
+				{
+					id: 'statusId',
+					type: 'dropdown',
+					label: 'Status',
+					default: self.getDefaultStatusChoice(),
+					choices: self.getStatusChoices(),
+					allowCustom: true,
+					regex: statusIdRegex,
+					tooltip: 'Pick a CrewLAN status, or type a status id to configure the button before the connection is up.',
+					description: 'Status ids can be typed, so buttons can be built before the connection is up.',
+				},
+			],
+			callback: async (event) => {
+				await self.runCrewLanAction('Set Indicator Status', async () => {
+					await self.setIndicatorStatus(String(event.options.indicatorId ?? ''), String(event.options.statusId ?? ''))
+				})
+			},
+		},
 		refresh: {
 			name: 'Refresh/Reconnect',
 			description: 'Rebuilds the CrewLAN connection. Progress is shown by the connection status, not by the button.',
@@ -409,5 +519,7 @@ export function UpdateActions(self: ModuleInstance): void {
 				self.refreshCrewLan()
 			},
 		},
-	})
+	}
+
+	self.setActionDefinitions(reportPlacement(self, definitions))
 }

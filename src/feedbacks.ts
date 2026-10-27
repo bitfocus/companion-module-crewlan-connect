@@ -1,7 +1,9 @@
 import { combineRgb } from '@companion-module/base'
-import { groupOption } from './actions.js'
+import { groupOption, indicatorOption } from './actions.js'
+import { wireRequests } from './api-v2.js'
 import { macroIdRegex, statusIdRegex } from './config.js'
 import type ModuleInstance from './main.js'
+import type { CrewLanState } from './types.js'
 import { getCompanionMacroStyle, getCompanionStatusStyle } from './button-style.js'
 
 export type FeedbacksSchema = {
@@ -31,6 +33,8 @@ export type FeedbacksSchema = {
 	call_talk_available: { type: 'boolean'; options: Record<string, never> }
 	call_talk_active: { type: 'boolean'; options: Record<string, never> }
 	group_member: { type: 'boolean'; options: { groupId: string } }
+	indicator_status_is: { type: 'boolean'; options: { indicatorId: string; statusId: string } }
+	indicator_ready: { type: 'boolean'; options: { indicatorId: string; statusId: string } }
 }
 
 function isCurrentStatus(self: ModuleInstance, statusId: string): boolean {
@@ -39,18 +43,25 @@ function isCurrentStatus(self: ModuleInstance, statusId: string): boolean {
 	return statusId.length > 0 && (currentStatus?.selectedStatusId === statusId || currentStatus?.status.id === statusId)
 }
 
+/** Whether the connection's offer holds `wireId` now; over v1, which says no offer, always. */
+export function isOffered(state: CrewLanState, wireId: string): boolean {
+	return state.requests === null || state.requests.includes(wireId)
+}
+
 /**
- * Connected, and the bound Entity is present at a Client, so CrewLAN accepts its writes.
+ * Connected, the connection's target attends, and CrewLAN offers every request the actions on the
+ * button `controlId` send, so it accepts the button's presses. A button the module knows no action
+ * of, or one read with no control, asks the first two alone.
  *
  * Only the readiness feedbacks read this; the state feedbacks say what CrewLAN reports, ready or
  * not, so a 1.x button and its `$(crewlan:…)` variable agree. A preset greys a key that is not
  * ready by its last feedback, its readiness feedback inverted with the offline style, which paints
- * over every state feedback before it.
+ * over every state feedback before it — a key placed before CrewLAN withdrew its request included.
  */
-export function isConnectionReady(self: ModuleInstance): boolean {
+export function isConnectionReady(self: ModuleInstance, controlId?: string): boolean {
 	const state = self.getCrewLanState()
 
-	return state.connected && state.ownerPresent
+	return state.connected && state.ownerPresent && self.isControlOffered(controlId)
 }
 
 function intercomGroup(self: ModuleInstance, groupId: string | undefined) {
@@ -58,8 +69,27 @@ function intercomGroup(self: ModuleInstance, groupId: string | undefined) {
 }
 
 /** What a talk key and *Answer* need: ready, with an audio connection. A direct call takes no talk key away. */
-function intercomKeysAvailable(self: ModuleInstance): boolean {
-	return isConnectionReady(self) && self.getCrewLanState().intercom?.audioConnected === true
+function intercomKeysAvailable(self: ModuleInstance, controlId: string | undefined): boolean {
+	return isConnectionReady(self, controlId) && self.getCrewLanState().intercom?.audioConnected === true
+}
+
+function indicatorOf(self: ModuleInstance, indicatorId: unknown) {
+	return self.getCrewLanState().indicators.find((indicator) => indicator.id === indicatorId)
+}
+
+/** The status picker of the indicator feedbacks, as the action's. */
+function indicatorStatusOption(self: ModuleInstance) {
+	return {
+		id: 'statusId',
+		type: 'dropdown',
+		label: 'Status',
+		default: self.getDefaultStatusChoice(),
+		choices: self.getStatusChoices(),
+		allowCustom: true,
+		regex: statusIdRegex,
+		tooltip: 'Pick a CrewLAN status, or type a status id to configure the button before the connection is up.',
+		description: 'Status ids can be typed, so buttons can be built before the connection is up.',
+	} as const
 }
 
 export function UpdateFeedbacks(self: ModuleInstance): void {
@@ -85,7 +115,7 @@ export function UpdateFeedbacks(self: ModuleInstance): void {
 				color: combineRgb(255, 255, 255),
 			},
 			options: [],
-			callback: () => isConnectionReady(self),
+			callback: (feedback) => isConnectionReady(self, feedback.controlId),
 		},
 		status_is: {
 			name: 'Current Status Is',
@@ -290,7 +320,7 @@ export function UpdateFeedbacks(self: ModuleInstance): void {
 			defaultStyle: { bgcolor: combineRgb(48, 167, 91), color: combineRgb(255, 255, 255) },
 			options: [groupOption(self)],
 			callback: (feedback) =>
-				intercomKeysAvailable(self) && intercomGroup(self, feedback.options.groupId) !== undefined,
+				intercomKeysAvailable(self, feedback.controlId) && intercomGroup(self, feedback.options.groupId) !== undefined,
 		},
 		group_talk_active: {
 			name: 'Group Talk Active',
@@ -339,7 +369,8 @@ export function UpdateFeedbacks(self: ModuleInstance): void {
 			type: 'boolean',
 			defaultStyle: { bgcolor: combineRgb(48, 167, 91), color: combineRgb(255, 255, 255) },
 			options: [],
-			callback: () => intercomKeysAvailable(self) && (self.getCrewLanState().intercom?.ringing ?? null) !== null,
+			callback: (feedback) =>
+				intercomKeysAvailable(self, feedback.controlId) && (self.getCrewLanState().intercom?.ringing ?? null) !== null,
 		},
 		call_talk_available: {
 			name: 'Direct: Talk Available',
@@ -348,7 +379,8 @@ export function UpdateFeedbacks(self: ModuleInstance): void {
 			type: 'boolean',
 			defaultStyle: { bgcolor: combineRgb(48, 167, 91), color: combineRgb(255, 255, 255) },
 			options: [],
-			callback: () => intercomKeysAvailable(self) && (self.getCrewLanState().intercom?.call ?? null) !== null,
+			callback: (feedback) =>
+				intercomKeysAvailable(self, feedback.controlId) && (self.getCrewLanState().intercom?.call ?? null) !== null,
 		},
 		call_talk_active: {
 			name: 'Direct: Talk Active',
@@ -364,7 +396,33 @@ export function UpdateFeedbacks(self: ModuleInstance): void {
 			type: 'boolean',
 			defaultStyle: { bgcolor: combineRgb(48, 167, 91), color: combineRgb(255, 255, 255) },
 			options: [groupOption(self)],
-			callback: (feedback) => isConnectionReady(self) && intercomGroup(self, feedback.options.groupId) !== undefined,
+			callback: (feedback) =>
+				isConnectionReady(self, feedback.controlId) && intercomGroup(self, feedback.options.groupId) !== undefined,
+		},
+		indicator_status_is: {
+			name: 'Indicator Status Is',
+			description: 'True while the status indicator stands at the selected status. Needs /api/v2.',
+			type: 'boolean',
+			defaultStyle: { bgcolor: combineRgb(41, 121, 255), color: combineRgb(255, 255, 255) },
+			options: [indicatorOption(self), indicatorStatusOption(self)],
+			callback: (feedback) => {
+				const statusId = String(feedback.options.statusId ?? '')
+
+				return statusId.length > 0 && indicatorOf(self, feedback.options.indicatorId)?.statusId === statusId
+			},
+		},
+		indicator_ready: {
+			name: 'Indicator Ready',
+			description:
+				'True while the connection is ready and CrewLAN lets it set the status indicator to the selected status. Needs /api/v2.',
+			type: 'boolean',
+			defaultStyle: { bgcolor: combineRgb(48, 167, 91), color: combineRgb(255, 255, 255) },
+			options: [indicatorOption(self), indicatorStatusOption(self)],
+			callback: (feedback) =>
+				isConnectionReady(self, feedback.controlId) &&
+				isOffered(self.getCrewLanState(), wireRequests.setIndicatorStatus) &&
+				indicatorOf(self, feedback.options.indicatorId)?.statusIds.includes(String(feedback.options.statusId ?? '')) ===
+					true,
 		},
 	})
 }

@@ -17,7 +17,7 @@ function actions(): { definitions: Record<string, { callback: Callback }>; calls
 			calls.push([name, ...args])
 		}
 	const self = {
-		getCrewLanState: () => ({ intercom: null }),
+		getCrewLanState: () => ({ intercom: null, indicators: [] }),
 		getStatusChoices: () => [],
 		getDefaultStatusChoice: () => '',
 		getMacroChoices: () => [],

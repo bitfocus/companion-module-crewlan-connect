@@ -26,6 +26,7 @@ export type VariablesSchema = {
 	input_muted: boolean
 	intercom_ringing_caller: string
 	intercom_call_partner: string
+	target_kind: string
 }
 
 export function UpdateVariableDefinitions(self: ModuleInstance): void {
@@ -54,6 +55,7 @@ export function UpdateVariableDefinitions(self: ModuleInstance): void {
 		input_muted: { name: 'Input muted' },
 		intercom_ringing_caller: { name: 'Direct: who rings' },
 		intercom_call_partner: { name: 'Direct: who the call is with, or whom your own call rings' },
+		target_kind: { name: 'What the connection acts for: identity or indicator (v2 only)' },
 	})
 }
 
@@ -88,5 +90,6 @@ export function UpdateVariableValues(self: ModuleInstance): void {
 		input_muted: state.intercom?.inputMuted === true,
 		intercom_ringing_caller: state.intercom?.ringing?.name ?? '',
 		intercom_call_partner: state.intercom?.call?.name ?? state.intercom?.calling?.name ?? '',
+		target_kind: state.targetKind ?? '',
 	})
 }

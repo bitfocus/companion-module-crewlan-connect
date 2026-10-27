@@ -53,6 +53,9 @@ function createState(input: Partial<CrewLanState> = {}): CrewLanState {
 		api: 'v2',
 		ownerPresent: true,
 		intercom: createIntercom(),
+		targetKind: 'identity',
+		requests: null,
+		indicators: [],
 		...input,
 	}
 }
@@ -61,6 +64,7 @@ function definitionsFor(state: CrewLanState): Record<string, Definition> {
 	let captured: Record<string, Definition> | undefined
 	const self = {
 		getCrewLanState: () => state,
+		isControlOffered: () => true,
 		getStatusChoices: () => [],
 		getDefaultStatusChoice: () => '',
 		getMacroChoices: () => [],
@@ -250,5 +254,35 @@ describe('Companion intercom feedbacks', () => {
 		for (const [id, definition] of Object.entries(definitionsFor(createState()))) {
 			assert.doesNotMatch(`${definition.name} ${definition.description ?? ''}`, /shoutbox/iu, id)
 		}
+	})
+})
+
+describe('Companion status indicator feedbacks', () => {
+	const indicatorId = 'ind-0123456789abcdef0123456789abcdef'
+	const indicators = [
+		{ id: indicatorId, name: 'Stage door', statusIds: ['sys-green', 'sys-yellow'], statusId: 'sys-green' },
+	]
+	const options = (statusId: string) => ({ indicatorId, statusId })
+
+	it('says the status an indicator stands at', () => {
+		const state = createState({ indicators })
+
+		assert.equal(value(state, 'indicator_status_is', options('sys-green')), true)
+		assert.equal(value(state, 'indicator_status_is', options('sys-yellow')), false)
+		assert.equal(value(state, 'indicator_status_is', options('')), false)
+		assert.equal(value(createState(), 'indicator_status_is', options('sys-green')), false)
+	})
+
+	it('is ready only for a status the offer lists for the indicator, while connected and attending', () => {
+		const offered = { indicators, requests: ['status.command.setIndicatorStatus'] }
+
+		assert.equal(value(createState(offered), 'indicator_ready', options('sys-yellow')), true)
+		assert.equal(value(createState(offered), 'indicator_ready', options('sys-red')), false)
+		assert.equal(value(createState({ ...offered, requests: [] }), 'indicator_ready', options('sys-yellow')), false)
+		assert.equal(value(createState({ ...offered, indicators: [] }), 'indicator_ready', options('sys-yellow')), false)
+		assert.equal(
+			value(createState({ ...offered, ownerPresent: false }), 'indicator_ready', options('sys-yellow')),
+			false,
+		)
 	})
 })

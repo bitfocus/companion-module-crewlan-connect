@@ -3,8 +3,9 @@ import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { after, before, describe, it } from 'node:test'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { wireRequests } from '../src/api-v2.js'
 import ModuleInstance from '../src/main.js'
-import type { IntegrationIntercomControls } from '../src/types.js'
+import type { IntegrationIndicatorOffer, IntegrationIntercomControls } from '../src/types.js'
 
 /** The module against a fake Workspace serving `/api/v2`, as `instance.test.ts` fakes v1. */
 
@@ -23,6 +24,12 @@ interface Fake {
 	statusId: string
 	/** Per wire id: a refusal to answer instead of the outcome. */
 	refuse: Map<string, { status: number; error: string; message: string }>
+	/** What `GET /api/v2` offers; a request it does not hold is refused `403 request_not_offered`, as CrewLAN does. */
+	offer: { requests: string[]; indicators: IntegrationIndicatorOffer[] }
+	/** The snapshot's `entity`: without `kind` and `attends` by default, as a Workspace that predates them. */
+	entity: Record<string, unknown>
+	/** The snapshot's `statuses.indicators`. */
+	indicators: Array<{ id: string; displayIdentity: string; statusId: string; since: string | null }>
 	send(frame: string): void
 	event(wireId: string, payload: object): void
 	streams: number
@@ -67,6 +74,9 @@ async function startFake(): Promise<Fake> {
 		snapshotDelayMs: 0,
 		statusId: 'ready',
 		refuse: new Map(),
+		offer: { requests: Object.values(wireRequests), indicators: [] },
+		entity: { id: 'ent-1', displayIdentity: 'Desk', protected: false },
+		indicators: [],
 		send: (frame) => stream?.write(frame),
 		event: (wireId, payload) =>
 			stream?.write(
@@ -96,10 +106,34 @@ async function startFake(): Promise<Fake> {
 				return
 			}
 
+			if (path.startsWith('/api/v2/requests/') && !fake.offer.requests.includes(wireId)) {
+				json(403, { error: 'request_not_offered', message: 'this connection is not offered this request' })
+				return
+			}
+
 			switch (path) {
 				case '/api/v2':
-					json(200, { data: { api: 'v2', limits: {}, requests: [{ wireId: 'macros.command.runMacro' }], events: [] } })
+					json(200, {
+						data: {
+							api: 'v2',
+							limits: {},
+							requests: fake.offer.requests.map((offered) => ({ wireId: offered })),
+							indicators: fake.offer.indicators,
+							events: [],
+						},
+					})
 					return
+				case '/api/v2/requests/status.command.setIndicatorStatus': {
+					const asked = fake.requests.at(-1)?.body as { indicatorId: string; statusId: string }
+					const indicator = fake.indicators.find((candidate) => candidate.id === asked.indicatorId)
+
+					if (indicator !== undefined) {
+						indicator.statusId = asked.statusId
+					}
+
+					json(200, { data: { indicator } })
+					return
+				}
 				case '/api/v2/requests/macros.command.runMacro':
 					// A fast run: it starts and ends before its answer, which still says it runs.
 					fake.event('macros.event.macroRunStarted', { macroId: 'mac-1', runId: 'run-9' })
@@ -128,7 +162,7 @@ async function startFake(): Promise<Fake> {
 								data: {
 									workspace: { id: 'wsp-1', name: 'Show', timeZone: 'Europe/Berlin' },
 									connection: { id: 'con-1', name: 'Companion', access: 'act' },
-									entity: { id: 'ent-1', displayIdentity: 'Desk', protected: false },
+									entity: fake.entity,
 									participants: fake.participants,
 									statuses: {
 										statuses: [
@@ -146,21 +180,25 @@ async function startFake(): Promise<Fake> {
 												changedAt: '2026-10-25T20:00:00.000Z',
 											},
 										],
-										indicators: [],
+										indicators: fake.indicators,
 										formerIndicators: [],
 										limits: {},
 									},
-									macros: [
-										{
-											id: 'mac-1',
-											name: 'Doors',
-											color: '#1D71C7',
-											running,
-											runStartedAt: null,
-											updatedAt: null,
-											runnable: true,
-										},
-									],
+									// A connection acting for a status indicator sees no macro.
+									macros:
+										fake.entity.kind === 'indicator'
+											? []
+											: [
+													{
+														id: 'mac-1',
+														name: 'Doors',
+														color: '#1D71C7',
+														running,
+														runStartedAt: null,
+														updatedAt: null,
+														runnable: true,
+													},
+												],
 								},
 							}),
 						fake.snapshotDelayMs,
@@ -222,6 +260,8 @@ interface Host {
 	registrations: number
 	status: string | null
 	logs: string[]
+	/** Every feedback id the module asked Companion to re-check, in order. */
+	checked: string[]
 }
 
 function createHost(): Host {
@@ -232,6 +272,7 @@ function createHost(): Host {
 		registrations: 0,
 		status: null,
 		logs: [],
+		checked: [],
 	}
 	const context = {
 		id: 'test',
@@ -248,7 +289,7 @@ function createHost(): Host {
 		setVariableValues: (values: Record<string, unknown>) => Object.assign(host.variables, values),
 		getVariableValue: (key: string) => host.variables[key],
 		checkAllFeedbacks: () => undefined,
-		checkFeedbacks: () => undefined,
+		checkFeedbacks: (ids: string[]) => host.checked.push(...ids),
 		checkFeedbacksById: () => undefined,
 		subscribeActions: () => undefined,
 		unsubscribeActions: () => undefined,
@@ -676,6 +717,185 @@ describe('module against a Workspace serving /api/v2', () => {
 		await sleep(2500)
 		assert.ok(reads() - before <= 1, `controls read ${String(reads() - before)} times while down`)
 		assert.equal(host.instance.getCrewLanState().controls, null)
+	})
+})
+
+describe('module following what /api/v2 says the connection may do', () => {
+	const indicatorId = 'ind-0123456789abcdef0123456789abcdef'
+	let fake: Fake
+	let host: Host
+	const asked = (wireId: string): number =>
+		fake.requests.filter((request) => request.path === `/api/v2/requests/${wireId}`).length
+	const state = () => host.instance.getCrewLanState()
+	const offerRecord = (): string =>
+		`event: offer\ndata: ${JSON.stringify({
+			requests: fake.offer.requests.map((wireId) => ({ wireId, kind: 'command' })),
+			indicators: fake.offer.indicators,
+		})}\n\n`
+
+	before(async () => {
+		fake = await startFake()
+		fake.entity = { id: 'ent-1', displayIdentity: 'Desk', protected: false, kind: 'identity', attends: true }
+		fake.indicators = [{ id: indicatorId, displayIdentity: 'Stage door · Light', statusId: 'ready', since: null }]
+		fake.offer.indicators = [{ indicatorId, statusIds: ['ready', 'attention'] }]
+		host = createHost()
+		await host.instance.init({ baseUrl: `http://127.0.0.1:${String(fake.port)}`, pollIntervalMs: 1000 }, true, {
+			entityToken: 'con_test',
+		})
+		await waitFor(() => host.status === 'ok', 'the connection to report ok')
+		await waitFor(() => fake.streams > 0, 'the event stream to open')
+	})
+
+	after(async () => {
+		await host.instance.destroy()
+		await fake.close()
+	})
+
+	it('detects the target kind and offers presets for every indicator it may set', () => {
+		assert.equal(state().targetKind, 'identity')
+		assert.equal(host.variables.target_kind, 'identity')
+		assert.deepEqual(state().indicators, [
+			{ id: indicatorId, name: 'Stage door · Light', statusIds: ['sys-green', 'sys-yellow'], statusId: 'sys-green' },
+		])
+		assert.ok(host.presets.includes(`indicator_${indicatorId}_sys-green`))
+		assert.ok(host.presets.includes(`indicator_${indicatorId}_sys-yellow`))
+		assert.ok(host.presets.includes('talk_push'))
+		assert.ok(host.presets.includes('status_sys-green'))
+	})
+
+	it('sets an indicator to a status it may set, and refuses another before sending it', async () => {
+		await host.instance.setIndicatorStatus(indicatorId, 'sys-yellow')
+		assert.deepEqual(
+			fake.requests
+				.filter((request) => request.path.endsWith(wireRequests.setIndicatorStatus))
+				.map((request) => request.body),
+			[{ indicatorId, statusId: 'attention' }],
+		)
+		assert.equal(state().indicators[0]?.statusId, 'sys-yellow')
+
+		await host.instance.setIndicatorStatus(indicatorId, 'sys-red')
+		await host.instance.setIndicatorStatus('ind-ffffffffffffffffffffffffffffffff', 'sys-green')
+		assert.equal(asked(wireRequests.setIndicatorStatus), 1)
+		assert.ok(
+			host.logs.includes(
+				'warn: Set Indicator Status: CrewLAN does not let this connection set Stage door · Light to "sys-red", so nothing was sent. It may set: sys-green, sys-yellow',
+			),
+		)
+		assert.ok(
+			host.logs.includes(
+				'warn: Set Indicator Status: CrewLAN does not let this connection set the status indicator "ind-ffffffffffffffffffffffffffffffff" now, so nothing was sent.',
+			),
+		)
+	})
+
+	it('follows an indicator status event', async () => {
+		fake.event('status.event.indicatorStatusChanged', {
+			indicatorId,
+			statusId: 'ready',
+			previousStatusId: 'attention',
+			cause: 'chosen',
+			since: new Date().toISOString(),
+		})
+		await waitFor(() => state().indicators[0]?.statusId === 'sys-green', 'the indicator back at ready')
+	})
+
+	it('greys at once when the target stops attending, holds it against other frames, and restores it', async () => {
+		fake.entity = { ...fake.entity, attends: false }
+		fake.send('event: attendance\ndata: {"attends":false}\n\n')
+		await waitFor(() => !state().ownerPresent, 'the buttons grey')
+		// While CrewLAN says attendance itself, no other frame stands in for it, and the snapshot a gap
+		// reads says what the record said.
+		fake.event('macros.event.macroRunStarted', { macroId: 'mac-1', runId: 'run-1' })
+		fake.send('event: gap\ndata: {}\n\n')
+		await sleep(300)
+		assert.equal(state().ownerPresent, false)
+		fake.entity = { ...fake.entity, attends: true }
+		fake.send('event: attendance\ndata: {"attends":true}\n\n')
+		await waitFor(() => state().ownerPresent, 'the buttons back')
+	})
+
+	it('greys a placed key whose request an offer record withdraws, and refuses its press before sending', async () => {
+		host.instance.notePlacedAction('btn-talk', 'act-1', [wireRequests.setControls])
+		host.instance.notePlacedAction('btn-status', 'act-2', [wireRequests.setEntityStatus])
+		assert.equal(host.instance.isControlOffered('btn-talk'), true)
+		host.checked.length = 0
+		const withdrawn: string[] = [
+			wireRequests.setControls,
+			wireRequests.getControls,
+			wireRequests.listGroups,
+			wireRequests.setListening,
+		]
+		fake.offer.requests = fake.offer.requests.filter((wireId) => !withdrawn.includes(wireId))
+		fake.send(offerRecord())
+
+		await waitFor(() => !host.instance.isControlOffered('btn-talk'), 'the talk key not offered')
+		assert.equal(host.instance.isControlOffered('btn-status'), true)
+		assert.ok(host.checked.includes('connection_ready'))
+		assert.ok(host.checked.includes('group_talk_available'))
+		assert.equal(state().intercom, null)
+		assert.equal(state().controls, null)
+		await waitFor(() => !host.presets.includes('talk_push'), 'the talk presets gone')
+		assert.ok(host.presets.includes('status_sys-green'))
+
+		const sent = asked(wireRequests.setControls)
+		await host.instance.runCrewLanAction('Talk', async () => {
+			await host.instance.setTalkState(true, 'push')
+		})
+		assert.equal(asked(wireRequests.setControls), sent)
+		assert.ok(
+			host.logs.includes(
+				'warn: Talk: CrewLAN does not offer this connection intercom.command.setControls now, so nothing was sent.',
+			),
+		)
+		// Nor is a read the offer does not hold asked for, every second or on a snapshot.
+		const reads = asked(wireRequests.getControls) + asked(wireRequests.listGroups)
+		await sleep(1500)
+		assert.equal(asked(wireRequests.getControls) + asked(wireRequests.listGroups), reads)
+		assert.equal(host.status, 'ok')
+
+		host.instance.noteRemovedAction('btn-talk', 'act-1')
+		assert.equal(host.instance.isControlOffered('btn-talk'), true)
+	})
+
+	it('follows a target change to a status indicator, asking only what its offer holds', async () => {
+		fake.entity = {
+			id: indicatorId,
+			displayIdentity: 'Stage door · Light',
+			protected: false,
+			kind: 'indicator',
+			attends: true,
+		}
+		fake.offer = {
+			requests: [wireRequests.setIndicatorStatus, 'status.query.listStatuses'],
+			indicators: [{ indicatorId, statusIds: ['ready', 'attention', 'standby'] }],
+		}
+		const mark = fake.requests.length
+		const streams = fake.streams
+		fake.send('event: ended\ndata: {"code":"connection_target_changed"}\n\n')
+
+		await waitFor(() => state().targetKind === 'indicator', 'the indicator target')
+		await waitFor(() => fake.streams > streams, 'the stream open again')
+		await sleep(300)
+		assert.equal(host.status, 'ok')
+		assert.equal(state().entity?.displayName, 'Stage door · Light')
+		assert.equal(state().status, null)
+		assert.equal(state().intercom, null)
+		assert.equal(state().macrosSupported, false)
+		assert.equal(host.variables.target_kind, 'indicator')
+		assert.deepEqual(
+			fake.requests
+				.slice(mark)
+				.map((request) => request.path)
+				.filter((path) => path.startsWith('/api/v2/requests/')),
+			[],
+		)
+		// `standby`, which this Workspace's catalogue lacks, has no look and so no preset.
+		await waitFor(
+			() =>
+				host.presets.join() === [`indicator_${indicatorId}_sys-green`, `indicator_${indicatorId}_sys-yellow`].join(),
+			"the indicator's presets alone",
+		)
+		assert.equal(host.instance.isControlOffered('btn-status'), false)
 	})
 })
 

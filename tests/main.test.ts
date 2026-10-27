@@ -67,6 +67,7 @@ describe('feedback groups', () => {
 			'answer_available',
 			'call_talk_available',
 			'group_member',
+			'indicator_ready',
 		])
 		// A feedback that reads several slices is re-checked when any of them changed.
 		assert.deepEqual(feedbackIdsForGroups(new Set(['intercom'])), [
@@ -83,6 +84,7 @@ describe('feedback groups', () => {
 			'group_member',
 		])
 		assert.deepEqual(feedbackIdsForGroups(new Set(['status'])), ['status_is', 'status_style'])
+		assert.deepEqual(feedbackIdsForGroups(new Set(['indicators'])), ['indicator_status_is', 'indicator_ready'])
 		assert.equal(feedbackIdsForGroups(new Set(['controls'])).length, 9)
 		assert.deepEqual(feedbackIdsForGroups(new Set()), [])
 	})
