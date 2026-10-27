@@ -1,9 +1,11 @@
 # CrewLAN Connect
 
-This module connects Companion to one CrewLAN entity through a CrewLAN Connect token. It can set
-that entity's status, dismiss its alerts, run the workspace macros, and drive its Intercom: Global
-Talk, the Output and Input mutes, a Talk and a Mute for every group the entity is in, and
-answering, talking in and hanging up a direct call.
+This module connects Companion to one CrewLAN connection through its CrewLAN Connect token. The
+connection acts for an entity, or for a status indicator. For an entity it can set the entity's
+status, set the status indicators CrewLAN lets it set, dismiss its alerts, run the workspace macros,
+and drive its Intercom: Global Talk, the Output and Input mutes, a Talk and a Mute for every group
+the entity is in, and answering, talking in and hanging up a direct call. For a status indicator it
+sets that indicator's status.
 
 Audio stays in CrewLAN. Companion only controls the Intercom of the entity the token belongs to; it
 sends and receives no audio of its own.
@@ -14,6 +16,15 @@ The module speaks the CrewLAN integration API, `/api/v2`, wherever the workspace
 Public API v1 otherwise. It asks `/api/v2` first on every connect, so nothing has to be chosen; the
 `api_version` variable says which one the connection speaks, `v2` or `v1`.
 
+Over `/api/v2` the module offers what CrewLAN says the connection may do, and nothing else. CrewLAN
+tells it which requests it may make and which status indicators it may set, to which statuses, and
+tells it again the moment that changes: when the connection is given a status indicator as its
+target, when its access or a permission level changes, when an indicator gets another owner. A
+preset whose action CrewLAN does not offer is left out of the preset list, a button already placed
+from one turns grey, and a press on it sends nothing and logs, for example,
+`Talk: CrewLAN does not offer this connection intercom.command.setControls now, so nothing was sent.`
+The `target_kind` variable says what the connection acts for: `identity`, an entity, or `indicator`.
+
 Over the Public API v1 — a CrewLAN v1 workspace — the connection keeps statuses, macros, alerts and
 the one Global Talk and Output. Input, the groups and direct calls need a workspace that serves
 `/api/v2`; over v1 their actions change nothing and say so in the connection's log. The _Direct_
@@ -21,7 +32,9 @@ buttons need a CrewLAN whose `/api/v2` reports the direct call; an earlier one s
 
 ## Setup
 
-1. In CrewLAN, create a Bitfocus Companion connection for the entity you want to control.
+1. In CrewLAN, create a Bitfocus Companion connection for the entity you want to control. CrewLAN
+   can give the connection a status indicator as its target instead; the module then offers that
+   indicator's buttons alone.
 2. **Address** — the CrewLAN host including the port, for example `http://192.168.1.20:4848`. A
    path is kept, so CrewLAN can sit behind a reverse proxy; a trailing `/api` or `/api/v1` is
    removed for you, as are any credentials in the address.
@@ -48,21 +61,26 @@ interval if you set it longer than that.
 connection is not up — the connection is disabled in Companion, the workspace cannot be reached,
 the token is refused or paused — and while the entity is not present at a CrewLAN Client. CrewLAN
 accepts a connection's presses only while its entity is present at a Client, and the connection
-stays up meanwhile. A press CrewLAN refuses for that reason greys the buttons at once. Without
-one, they turn grey within about 45 seconds after the entity's last Client closed: CrewLAN's
-15-second grace, plus up to 30 seconds until the module's next read, or the poll interval where you
-set it longer. They return to their own look over `/api/v2` at any event from CrewLAN, the
-stream's resync after the entity returns included, an accepted press, an audio connection of the
-entity (seen within about a second) or a later status change; over the Public API v1 at an
-accepted press or a later status change. Companion's preset list shows each button in its own
+stays up meanwhile. A press CrewLAN refuses for that reason greys the buttons at once. A CrewLAN
+whose `/api/v2` says whether the entity attends greys them within about a second of the entity's
+last Client closing, and brings them back within about a second of one attaching again; a
+connection acting for a status indicator is never greyed for this. On an earlier CrewLAN they turn
+grey within about 45 seconds after the entity's last Client closed: CrewLAN's 15-second grace, plus
+up to 30 seconds until the module's next read, or the poll interval where you set it longer, and
+return to their own look over `/api/v2` at any event from CrewLAN, the stream's resync after the
+entity returns included, an accepted press, an audio connection of the entity (seen within about a
+second) or a later status change; over the Public API v1 at an accepted press or a later status
+change. Companion's preset list shows each button in its own
 look. A Talk or Answer button is greyed the same way while it cannot work: while no CrewLAN Client
 of the entity has its audio open. _Direct: Answer_ is grey while nobody rings, and the direct
 call's Talk buttons while no call is active. A group's buttons grey once the entity is no longer in
-the group.
+the group. Any button greys while CrewLAN does not offer this connection what one of its actions
+does.
 
 The grey look lives in the presets: a preset's base style is the grey, and its feedbacks paint the
 ordinary look while the button can work. Only **Connection Ready**, **Group Talk Available**,
-**Group Member**, **Direct: Answer Available** and **Direct: Talk Available** depend on that; every
+**Group Member**, **Direct: Answer Available**, **Direct: Talk Available** and **Indicator Ready**
+depend on that, each of them also on CrewLAN offering what the button's own actions do; every
 other feedback shows CrewLAN's state at all times. To give a button of your own the grey look, give it dark grey with
 light grey text, add **Connection Ready** as its first feedback, painting its ordinary look, and
 add it once more as its last feedback, inverted, in the grey, so that no state feedback between
@@ -73,10 +91,21 @@ did: they do not turn grey. Drag the preset onto the button again to give it the
 Companion's upgrade scripts cannot add a feedback to a button that is already placed, nor change its
 base style.
 
-**Statuses.** Every selectable CrewLAN status becomes a ready-made button in the _Status_ preset
-section, painted in that status's own colours and lit while it is the current one. The five
+**Statuses.** While CrewLAN lets the connection set its entity's status, every selectable CrewLAN
+status becomes a ready-made button in the _Status_ preset section, painted in that status's own colours and lit while it is the current one. The five
 built-in CrewLAN statuses are labelled Ready, Attention, Critical, Standby and Offline regardless
 of the language CrewLAN runs in; your own custom statuses keep their CrewLAN label exactly.
+
+**Status indicators.** Every status indicator CrewLAN lets this connection set gets a section of
+its own in the _Status Indicators_ preset section, with one button for every status CrewLAN lets it
+set the indicator to: labelled with the indicator's name and the status, painted in the status's
+colours, and lit while the indicator stands at it. For an entity these are the indicators CrewLAN
+lets that entity set, such as the ones it owns; for a connection acting for a status indicator, that
+indicator. The list follows CrewLAN: an indicator the connection may newly set brings its buttons,
+and one it may no longer set takes them away and greys a button placed from them. For a button of
+your own use the _Set Indicator Status_ action with the **Indicator Status Is** and **Indicator
+Ready** feedbacks. A press for an indicator or a status CrewLAN does not let this connection set
+sends nothing and logs why.
 
 **Macros.** Every macro CrewLAN publishes as runnable becomes a button in the _Macros_ section. The
 text and colours are the macro's own, the button is dimmed while the macro is idle and fully lit
@@ -150,6 +179,11 @@ come back at the next sign of it that _Offline at a glance_ lists; over the Publ
 later status change or a press CrewLAN accepts, so a press is worth a try. A press meanwhile is
 refused because the entity is not present, never as a revoked token, and letting go of a held Talk
 is still accepted.
+
+**A button is grey, but the entity is present.** CrewLAN does not let this connection do what the
+button does: the connection may have been given a status indicator as its target, its access may be
+read-only, or a permission level withholds it. A press logs which request CrewLAN does not offer.
+The button comes back by itself when CrewLAN offers it again.
 
 **The connection says "Bad configuration".** Either the connection is not filled in yet — the
 status line then names the setting, for example `Connection token is required.` — or CrewLAN
