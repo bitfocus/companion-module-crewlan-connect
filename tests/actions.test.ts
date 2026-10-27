@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import type ModuleInstance from '../src/main.js'
+import type { CompanionActionInfo } from '@companion-module/base'
+import ModuleInstance from '../src/main.js'
 import { UpdateActions } from '../src/actions.js'
+import { wireRequests } from '../src/api-v2.js'
+import { isConnectionReady } from '../src/feedbacks.js'
+import type { CrewLanState } from '../src/types.js'
 
 type Callback = (event: { options: Record<string, unknown> }) => Promise<void>
 
@@ -133,5 +137,72 @@ describe('Companion intercom actions', () => {
 		await definitions.group_mute?.callback({ options: { groupId: 'everyone', mode: 'bogus' } })
 
 		assert.deepEqual(calls.at(-1), ['setGroupMuteMode', 'everyone', 'toggle'])
+	})
+})
+
+describe('Companion action placement', () => {
+	type Placement = (action: CompanionActionInfo) => void
+
+	/** A module whose state says `requests` are offered, and the definitions Companion was given. */
+	function placedModule(requests: string[]): {
+		instance: ModuleInstance
+		definitions: () => Record<string, { subscribe?: Placement; unsubscribe?: Placement }>
+		checked: string[]
+	} {
+		let definitions: Record<string, { subscribe?: Placement; unsubscribe?: Placement }> = {}
+		const checked: string[] = []
+		;(globalThis as { COMPANION_LOGGER?: unknown }).COMPANION_LOGGER = () => undefined
+		const instance = new ModuleInstance({
+			id: 'test',
+			label: 'test',
+			_isInstanceContext: true,
+			setActionDefinitions: (captured: typeof definitions) => {
+				definitions = captured
+			},
+			setFeedbackDefinitions: () => undefined,
+			setPresetDefinitions: () => undefined,
+			setVariableDefinitions: () => undefined,
+			setVariableValues: () => undefined,
+			checkFeedbacks: (ids: string[]) => checked.push(...ids),
+		})
+
+		instance.updateActions()
+		;(instance as unknown as { updateState(patch: Partial<CrewLanState>): void }).updateState({
+			connected: true,
+			requests,
+		})
+
+		return { instance, definitions: () => definitions, checked }
+	}
+
+	it('greys a placed button whose request the offer withholds, and un-greys it once its action goes', () => {
+		const { instance, definitions, checked } = placedModule([wireRequests.setEntityStatus])
+		const talk = { id: 'act-1', controlId: 'btn-talk', actionId: 'talk_push_down', options: {} }
+		const status = { id: 'act-2', controlId: 'btn-status', actionId: 'set_status', options: {} }
+		checked.length = 0
+
+		definitions().talk_push_down?.subscribe?.(talk)
+		definitions().set_status?.subscribe?.(status)
+
+		assert.equal(isConnectionReady(instance, 'btn-talk'), false)
+		assert.equal(isConnectionReady(instance, 'btn-status'), true)
+		assert.ok(checked.includes('connection_ready'))
+
+		checked.length = 0
+		definitions().talk_push_down?.unsubscribe?.(talk)
+
+		assert.equal(isConnectionReady(instance, 'btn-talk'), true)
+		assert.ok(checked.includes('connection_ready'))
+	})
+
+	it('greys a button when one of the actions placed on it is withheld', () => {
+		const { instance, definitions } = placedModule([wireRequests.setEntityStatus])
+
+		definitions().set_status?.subscribe?.({ id: 'act-1', controlId: 'btn', actionId: 'set_status', options: {} })
+		assert.equal(isConnectionReady(instance, 'btn'), true)
+		definitions().run_macro?.subscribe?.({ id: 'act-2', controlId: 'btn', actionId: 'run_macro', options: {} })
+		assert.equal(isConnectionReady(instance, 'btn'), false)
+		definitions().run_macro?.unsubscribe?.({ id: 'act-2', controlId: 'btn', actionId: 'run_macro', options: {} })
+		assert.equal(isConnectionReady(instance, 'btn'), true)
 	})
 })

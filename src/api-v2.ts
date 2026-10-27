@@ -387,6 +387,9 @@ export class CrewLanV2Client {
 	private entityId: string | null = null
 	private indicatorViews = new Map<string, IntegrationIndicatorView>()
 	private offer: IntegrationOffer
+	/** How many `offer` records the stream has written: a `GET /api/v2` answered after one is older than it. */
+	private offerRecords = 0
+	private offerRecordSeen = false
 
 	constructor(
 		private readonly http: CrewLanApiClient,
@@ -400,6 +403,14 @@ export class CrewLanV2Client {
 	/** Whether this connection may run macros, as its offer says now. */
 	get mayRunMacros(): boolean {
 		return this.offers(wireRequests.runMacro)
+	}
+
+	/**
+	 * Whether the stream open now has written an `offer` record, so it writes each later change of the
+	 * offer too. A CrewLAN that writes none (2.0.x) is read with `GET /api/v2` instead.
+	 */
+	get streamTellsOffer(): boolean {
+		return this.offerRecordSeen
 	}
 
 	/** Whether the offer holds `wireId` now. */
@@ -436,9 +447,17 @@ export class CrewLanV2Client {
 		}
 	}
 
-	/** Reads `GET /api/v2` again, for the offer, while no stream says it. */
+	/**
+	 * Reads `GET /api/v2` again, for the offer, while no stream says it. An answer an `offer` record
+	 * overtook is dropped: the record is CrewLAN's later word, and the stream writes the next change.
+	 */
 	async readOffer(options: RequestOptions = {}): Promise<void> {
-		this.applyOffer((await this.http.request('/api/v2', {}, options, isItemResponse(isIntegrationDescription))).data)
+		const records = this.offerRecords
+		const answer = await this.http.request('/api/v2', {}, options, isItemResponse(isIntegrationDescription))
+
+		if (records === this.offerRecords) {
+			this.applyOffer(answer.data)
+		}
 	}
 
 	/**
@@ -661,6 +680,7 @@ export class CrewLanV2Client {
 	 * asks of a v2 reader.
 	 */
 	async streamEvents(options: StreamEventsOptions): Promise<void> {
+		this.offerRecordSeen = false
 		await this.http.openEventStream(`/api/v2/events?types=${integrationEventTypes.join(',')}`, options, (frames) => {
 			for (const frame of frames) {
 				switch (frame.event) {
@@ -684,6 +704,8 @@ export class CrewLanV2Client {
 						const offer = parseRecord(frame.data)
 
 						if (isIntegrationOffer(offer)) {
+							this.offerRecords += 1
+							this.offerRecordSeen = true
 							this.applyOffer(offer)
 							options.onOffer?.()
 						} else {

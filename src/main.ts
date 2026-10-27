@@ -7,6 +7,7 @@ import {
 	probeIntegrationApi,
 	wireRequests,
 	type IntegrationControlsBody,
+	type IntegrationState,
 } from './api-v2.js'
 import { UpdateActions, type ActionsSchema } from './actions.js'
 import {
@@ -399,9 +400,10 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	/**
 	 * What CrewLAN last said of whether the connection's target attends, and this machine's time it
 	 * was said at — by the snapshot's `attends` (its time the one it was asked at), the stream's
-	 * `attendance` record, an accepted write or a refusal naming the owner absent. Null where
-	 * CrewLAN says nothing of it (a Workspace predating it, or v1): `ownerAbsence` and the status
-	 * then decide, as before. While it is set it alone decides whether the buttons grey.
+	 * `attendance` record, an accepted write or a refusal naming the owner absent (the time its press
+	 * was sent at, so a word CrewLAN said after the press stands). Null where CrewLAN says nothing of
+	 * it (a Workspace predating it, or v1): `ownerAbsence` and the status then decide, as before.
+	 * While it is set it alone decides whether the buttons grey.
 	 */
 	private attendance: { attends: boolean; at: number } | null = null
 	/**
@@ -605,6 +607,8 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	}
 
 	async runCrewLanAction(actionName: string, action: () => Promise<void>): Promise<void> {
+		const sentAt = Date.now()
+
 		try {
 			await action()
 		} catch (error) {
@@ -613,7 +617,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 				return
 			}
 
-			this.handleOperationError(actionName, error)
+			this.handleOperationError(actionName, error, sentAt)
 		}
 	}
 
@@ -1229,20 +1233,42 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 
 	/**
 	 * The `/api/v2` snapshot: one read of the snapshot, and of the controls and the groups where the
-	 * offer holds their reads, in v1's shapes. While no stream says the offer, `GET /api/v2` is read
-	 * again first, so a poll never asks for what the connection may no longer read.
+	 * offer holds their reads, in v1's shapes. Until the open stream has written an `offer` record —
+	 * none open, or a CrewLAN whose stream writes none (2.0.x) — `GET /api/v2` is read again first,
+	 * so a poll never asks for what the connection may no longer read.
+	 *
+	 * A read the offer held, refused `403`, says the offer is stale, not the token refused: CrewLAN
+	 * judges a token's next request by a changed target at once, while the stream that tells the new
+	 * offer ends only at its next tick, up to a second later. The offer is read again then, and the
+	 * snapshot once more; a refused token is refused that too, and fails the connection.
 	 */
 	private async loadIntegrationSnapshot(
 		api: CrewLanV2Client,
 		generation: number,
 		options: RequestOptions,
 	): Promise<void> {
-		if (this.state.connected && !this.state.streamConnected) {
+		if (this.state.connected && !(this.state.streamConnected && api.streamTellsOffer)) {
 			await api.readOffer(options)
 		}
 
-		const requestedAt = Date.now()
-		const snapshot = await api.loadSnapshot(options)
+		let requestedAt = Date.now()
+		let snapshot: IntegrationState
+
+		try {
+			snapshot = await api.loadSnapshot(options)
+		} catch (error) {
+			if (!(error instanceof CrewLanApiError && error.statusCode === 403)) {
+				throw error
+			}
+
+			this.log(
+				'debug',
+				`CrewLAN refused a read this connection's offer held (${describeError(error)}); reading what it may do again.`,
+			)
+			await api.readOffer(options)
+			requestedAt = Date.now()
+			snapshot = await api.loadSnapshot(options)
+		}
 
 		if (generation !== this.generation) {
 			return
@@ -1880,12 +1906,22 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		return false
 	}
 
-	/** Holds the buttons grey after an owner-absent refusal; see `ownerAbsence` and `attendance`. */
-	private noteAbsent(message: string): void {
+	/**
+	 * Holds the buttons grey after an owner-absent refusal of a press sent at `sentAt`; see
+	 * `ownerAbsence` and `attendance`.
+	 */
+	private noteAbsent(message: string, sentAt: number): void {
 		const statusAt = Date.parse(this.state.status?.updatedAt ?? '')
 
 		if (this.attendance !== null) {
-			this.attendance = { attends: false, at: Date.now() }
+			// The refusal says the target was absent when the press arrived, no later: CrewLAN's word
+			// since then — the target attached again before the refusal came back — stands.
+			if (sentAt < this.attendance.at) {
+				this.updateState({ lastError: message })
+				return
+			}
+
+			this.attendance = { attends: false, at: sentAt }
 		}
 
 		this.ownerAbsence = { statusAt: Number.isFinite(statusAt) ? statusAt : Number.NEGATIVE_INFINITY }
@@ -2190,14 +2226,15 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		this.log('warn', display === detail ? display : `${display} Reason: ${detail}`)
 	}
 
-	private handleOperationError(actionName: string, error: unknown): void {
+	/** An action's failure; `sentAt` is when it started, before anything was sent. */
+	private handleOperationError(actionName: string, error: unknown, sentAt: number): void {
 		let message = `${actionName}: ${describeError(error)}`
 
 		// Over /api/v2 the owner's absence is named, and no revoked token: the connection stays up and
 		// greys its buttons until a status or a snapshot shows the Entity present again.
 		if (isOwnerAbsentError(error)) {
 			this.log('warn', message)
-			this.noteAbsent(message)
+			this.noteAbsent(message, sentAt)
 			return
 		}
 
@@ -2212,7 +2249,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		) {
 			message += ` (${ownerAbsentMessage})`
 			this.log('warn', message)
-			this.noteAbsent(message)
+			this.noteAbsent(message, sentAt)
 			return
 		}
 

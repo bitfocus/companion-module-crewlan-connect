@@ -408,6 +408,42 @@ describe('v2 client against a fake /api/v2', () => {
 		)
 	})
 
+	it('renames an indicator by its update, and keeps a later status against an older change', () => {
+		const indicatorId = 'ind-0123456789abcdef0123456789abcdef'
+		const client = new CrewLanV2Client(
+			new CrewLanApiClient({ baseUrl, token: 'con_test', logger: silent }),
+			{ api: 'v2', requests: [], indicators: [{ indicatorId, statusIds: ['ready', 'attention'] }] },
+			silent,
+		)
+		const updated = (displayIdentity: string) => ({
+			indicator: { id: indicatorId, displayIdentity, statusId: 'attention', since: '2026-10-27T10:00:02.000Z' },
+		})
+		const changed = (since: string) => ({
+			indicatorId,
+			statusId: 'ready',
+			previousStatusId: 'attention',
+			cause: 'chosen',
+			since,
+		})
+		const standing = () => client.indicators().map((indicator) => [indicator.name, indicator.statusId])
+
+		assert.equal(client.applyIndicatorEvent('entities.event.indicatorUpdated', updated('Stage door · Light')), true)
+		assert.deepEqual(standing(), [['Stage door · Light', 'sys-yellow']])
+		assert.equal(client.applyIndicatorEvent('entities.event.indicatorUpdated', updated('Stage door · Lamp')), true)
+		assert.deepEqual(standing(), [['Stage door · Lamp', 'sys-yellow']])
+
+		assert.equal(
+			client.applyIndicatorEvent('status.event.indicatorStatusChanged', changed('2026-10-27T10:00:01.000Z')),
+			false,
+		)
+		assert.deepEqual(standing(), [['Stage door · Lamp', 'sys-yellow']])
+		assert.equal(
+			client.applyIndicatorEvent('status.event.indicatorStatusChanged', changed('2026-10-27T10:00:03.000Z')),
+			true,
+		)
+		assert.deepEqual(standing(), [['Stage door · Lamp', 'sys-green']])
+	})
+
 	it('carries the refusal code, so an absent owner is told apart', async () => {
 		const client = new CrewLanV2Client(
 			new CrewLanApiClient({ baseUrl, token: 'con_test', logger: silent }),

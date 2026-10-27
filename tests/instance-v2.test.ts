@@ -22,10 +22,12 @@ interface Fake {
 	snapshotMacroRunning: boolean
 	snapshotDelayMs: number
 	statusId: string
-	/** Per wire id: a refusal to answer instead of the outcome. */
-	refuse: Map<string, { status: number; error: string; message: string }>
+	/** Per wire id: a refusal to answer instead of the outcome, `delayMs` later where it is given. */
+	refuse: Map<string, { status: number; error: string; message: string; delayMs?: number }>
 	/** What `GET /api/v2` offers; a request it does not hold is refused `403 request_not_offered`, as CrewLAN does. */
 	offer: { requests: string[]; indicators: IntegrationIndicatorOffer[] }
+	/** How long `GET /api/v2` takes to answer the offer as it stood when it was asked. */
+	offerDelayMs: number
 	/** The snapshot's `entity`: without `kind` and `attends` by default, as a Workspace that predates them. */
 	entity: Record<string, unknown>
 	/** The snapshot's `statuses.indicators`. */
@@ -75,6 +77,7 @@ async function startFake(): Promise<Fake> {
 		statusId: 'ready',
 		refuse: new Map(),
 		offer: { requests: Object.values(wireRequests), indicators: [] },
+		offerDelayMs: 0,
 		entity: { id: 'ent-1', displayIdentity: 'Desk', protected: false },
 		indicators: [],
 		send: (frame) => stream?.write(frame),
@@ -102,7 +105,7 @@ async function startFake(): Promise<Fake> {
 			const refusal = fake.refuse.get(wireId)
 
 			if (refusal !== undefined) {
-				json(refusal.status, { error: refusal.error, message: refusal.message })
+				setTimeout(() => json(refusal.status, { error: refusal.error, message: refusal.message }), refusal.delayMs ?? 0)
 				return
 			}
 
@@ -112,17 +115,19 @@ async function startFake(): Promise<Fake> {
 			}
 
 			switch (path) {
-				case '/api/v2':
-					json(200, {
+				case '/api/v2': {
+					const description = {
 						data: {
 							api: 'v2',
 							limits: {},
 							requests: fake.offer.requests.map((offered) => ({ wireId: offered })),
-							indicators: fake.offer.indicators,
+							indicators: [...fake.offer.indicators],
 							events: [],
 						},
-					})
+					}
+					setTimeout(() => json(200, description), fake.offerDelayMs)
 					return
+				}
 				case '/api/v2/requests/status.command.setIndicatorStatus': {
 					const asked = fake.requests.at(-1)?.body as { indicatorId: string; statusId: string }
 					const indicator = fake.indicators.find((candidate) => candidate.id === asked.indicatorId)
@@ -799,6 +804,20 @@ describe('module following what /api/v2 says the connection may do', () => {
 		await waitFor(() => state().indicators[0]?.statusId === 'sys-green', 'the indicator back at ready')
 	})
 
+	it('renames an indicator through its event', async () => {
+		fake.event('entities.event.indicatorUpdated', {
+			indicator: { id: indicatorId, displayIdentity: 'Stage door · Lamp', statusId: 'ready', since: null },
+			previousDisplayIdentity: 'Stage door · Light',
+		})
+		await waitFor(() => state().indicators[0]?.name === 'Stage door · Lamp', 'the indicator renamed')
+		assert.equal(state().indicators[0]?.statusId, 'sys-green')
+		fake.event('entities.event.indicatorUpdated', {
+			indicator: { id: indicatorId, displayIdentity: 'Stage door · Light', statusId: 'ready', since: null },
+			previousDisplayIdentity: 'Stage door · Lamp',
+		})
+		await waitFor(() => state().indicators[0]?.name === 'Stage door · Light', 'the indicator named back')
+	})
+
 	it('greys at once when the target stops attending, holds it against other frames, and restores it', async () => {
 		fake.entity = { ...fake.entity, attends: false }
 		fake.send('event: attendance\ndata: {"attends":false}\n\n')
@@ -810,6 +829,33 @@ describe('module following what /api/v2 says the connection may do', () => {
 		await sleep(300)
 		assert.equal(state().ownerPresent, false)
 		fake.entity = { ...fake.entity, attends: true }
+		fake.send('event: attendance\ndata: {"attends":true}\n\n')
+		await waitFor(() => state().ownerPresent, 'the buttons back')
+	})
+
+	it('keeps an attendance CrewLAN said after a press over the absence refusal answering it', async () => {
+		const press = async () =>
+			host.instance.runCrewLanAction('Set My Status', async () => {
+				await host.instance.setCrewLanStatus('sys-yellow')
+			})
+		fake.refuse.set(wireRequests.setEntityStatus, {
+			status: 401,
+			error: 'connection_owner_absent',
+			message: 'this connection acts only while its participant is signed in at a Client, and they are not',
+			delayMs: 300,
+		})
+		// The target attaches again while the refusal of a press sent just before is on its way.
+		const pressed = press()
+		await sleep(100)
+		fake.send('event: attendance\ndata: {"attends":true}\n\n')
+		await pressed
+		assert.match(state().lastError, /^Set My Status: this connection acts only while/)
+		assert.equal(state().ownerPresent, true)
+
+		// A refusal of a press sent after CrewLAN's last word greys, as before.
+		await press()
+		assert.equal(state().ownerPresent, false)
+		fake.refuse.delete(wireRequests.setEntityStatus)
 		fake.send('event: attendance\ndata: {"attends":true}\n\n')
 		await waitFor(() => state().ownerPresent, 'the buttons back')
 	})
@@ -896,6 +942,132 @@ describe('module following what /api/v2 says the connection may do', () => {
 			"the indicator's presets alone",
 		)
 		assert.equal(host.instance.isControlOffered('btn-status'), false)
+	})
+})
+
+describe('module between a target change and the end of its stream', () => {
+	const indicatorId = 'ind-0123456789abcdef0123456789abcdef'
+	let fake: Fake
+	let host: Host
+
+	before(async () => {
+		fake = await startFake()
+		fake.entity = { id: 'ent-1', displayIdentity: 'Desk', protected: false, kind: 'identity', attends: true }
+		host = createHost()
+		await host.instance.init({ baseUrl: `http://127.0.0.1:${String(fake.port)}`, pollIntervalMs: 1000 }, true, {
+			entityToken: 'con_test',
+		})
+		await waitFor(() => host.status === 'ok', 'the connection to report ok')
+		await waitFor(() => fake.streams > 0 && host.instance.getCrewLanState().streamConnected, 'the stream to open')
+		// The stream says the offer, so a poll reads no `GET /api/v2` first.
+		fake.send(
+			`event: offer\ndata: ${JSON.stringify({ requests: fake.offer.requests.map((wireId) => ({ wireId, kind: 'command' })), indicators: [] })}\n\n`,
+		)
+		await sleep(100)
+	})
+
+	after(async () => {
+		await host.instance.destroy()
+		await fake.close()
+	})
+
+	it('reads the offer again when a read it held is refused, and keeps the connection', async () => {
+		// CrewLAN judges the token's next request by its new target at once; the stream telling the
+		// new offer ends only at its next tick.
+		fake.entity = {
+			id: indicatorId,
+			displayIdentity: 'Stage door · Light',
+			protected: false,
+			kind: 'indicator',
+			attends: true,
+		}
+		fake.offer = {
+			requests: [wireRequests.setIndicatorStatus, 'status.query.listStatuses'],
+			indicators: [{ indicatorId, statusIds: ['ready'] }],
+		}
+		const mark = fake.requests.length
+		fake.send('event: gap\ndata: {}\n\n')
+
+		await waitFor(() => host.instance.getCrewLanState().targetKind === 'indicator', 'the indicator target')
+		const paths = fake.requests.slice(mark).map((request) => request.path)
+		// The poll asked with the old offer, was refused, read the offer once, and read the snapshot again.
+		assert.ok(paths.indexOf(`/api/v2/requests/${wireRequests.getControls}`) >= 0)
+		assert.deepEqual(
+			paths.filter((path) => path === '/api/v2'),
+			['/api/v2'],
+		)
+		assert.ok(paths.lastIndexOf('/api/v2/snapshot') > paths.indexOf('/api/v2'))
+		assert.equal(host.status, 'ok')
+		assert.ok(!host.logs.some((line) => line.startsWith('status:authentication_failure')))
+		assert.deepEqual(host.instance.getCrewLanState().requests, fake.offer.requests)
+	})
+})
+
+describe('module against a CrewLAN whose stream writes no offer record', () => {
+	let fake: Fake
+	let host: Host
+	const offered = (): boolean | undefined =>
+		host.instance.getCrewLanState().requests?.includes(wireRequests.setControls)
+
+	before(async () => {
+		fake = await startFake()
+		fake.offer.requests = fake.offer.requests.filter((wireId) => wireId !== wireRequests.setControls)
+		host = createHost()
+		await host.instance.init({ baseUrl: `http://127.0.0.1:${String(fake.port)}`, pollIntervalMs: 1000 }, true, {
+			entityToken: 'con_test',
+		})
+		await waitFor(() => host.status === 'ok', 'the connection to report ok')
+		await waitFor(() => fake.streams > 0 && host.instance.getCrewLanState().streamConnected, 'the stream to open')
+	})
+
+	after(async () => {
+		await host.instance.destroy()
+		await fake.close()
+	})
+
+	it('takes a request added to the offer at its next read, the stream still standing', async () => {
+		assert.equal(offered(), false)
+		fake.offer.requests = [...fake.offer.requests, wireRequests.setControls]
+		fake.send('event: gap\ndata: {}\n\n')
+		await waitFor(() => offered() === true, 'the grown offer')
+
+		const sent = fake.requests.filter((request) => request.path.endsWith(wireRequests.setControls)).length
+		await host.instance.runCrewLanAction('Talk', async () => {
+			await host.instance.setTalkState(true, 'push')
+		})
+		assert.equal(fake.requests.filter((request) => request.path.endsWith(wireRequests.setControls)).length, sent + 1)
+		assert.equal(host.instance.getCrewLanState().streamConnected, true)
+	})
+
+	it('drops a GET /api/v2 answer an offer record overtook', async () => {
+		fake.offer.requests = [
+			...fake.offer.requests.filter((wireId) => wireId !== wireRequests.setControls),
+			wireRequests.setControls,
+		]
+		fake.offerDelayMs = 400
+		const reads = fake.requests.filter((request) => request.path === '/api/v2').length
+		fake.send('event: gap\ndata: {}\n\n')
+		await waitFor(
+			() => fake.requests.filter((request) => request.path === '/api/v2').length > reads,
+			'the offer read again',
+		)
+		// The answer on its way still holds setControls; the record, written while it is, does not.
+		fake.offer.requests = fake.offer.requests.filter((wireId) => wireId !== wireRequests.setControls)
+		fake.send(
+			`event: offer\ndata: ${JSON.stringify({ requests: fake.offer.requests.map((wireId) => ({ wireId, kind: 'command' })), indicators: [] })}\n\n`,
+		)
+		await waitFor(() => offered() === false, 'the offer record taken')
+		// The poll the record asks for runs once the one in flight settles; it reads no `GET /api/v2`,
+		// since the stream now says the offer.
+		const snapshots = fake.requests.filter((request) => request.path === '/api/v2/snapshot').length
+		await waitFor(
+			() => fake.requests.filter((request) => request.path === '/api/v2/snapshot').length >= snapshots + 1,
+			'the snapshots after the record',
+		)
+		await sleep(300)
+		assert.equal(offered(), false)
+		assert.equal(fake.requests.filter((request) => request.path === '/api/v2').length, reads + 1)
+		fake.offerDelayMs = 0
 	})
 })
 

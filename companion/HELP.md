@@ -19,8 +19,9 @@ Public API v1 otherwise. It asks `/api/v2` first on every connect, so nothing ha
 Over `/api/v2` the module offers what CrewLAN says the connection may do, and nothing else. CrewLAN
 tells it which requests it may make and which status indicators it may set, to which statuses, and
 tells it again the moment that changes: when the connection is given a status indicator as its
-target, when its access or a permission level changes, when an indicator gets another owner. A
-preset whose action CrewLAN does not offer is left out of the preset list, a button already placed
+target, when its access or a permission level changes, when an indicator gets another owner. An
+earlier CrewLAN, which does not tell it, is caught up at the module's next read: within 30 seconds,
+or the poll interval where you set it longer. A preset whose action CrewLAN does not offer is left out of the preset list, a button already placed
 from one turns grey, and a press on it sends nothing and logs, for example,
 `Talk: CrewLAN does not offer this connection intercom.command.setControls now, so nothing was sent.`
 The `target_kind` variable says what the connection acts for: `identity`, an entity, or `indicator`.
