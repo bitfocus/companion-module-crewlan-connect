@@ -125,11 +125,12 @@ function harness(state: CrewLanState): {
 			return actions.every((action) => actionRequests[action.actionId].every((wireId) => isOffered(state, wireId)))
 		},
 		getStatusChoices: () => [],
+		getIndicatorStatusChoices: () => [],
 		getDefaultStatusChoice: () => '',
 		getMacroChoices: () => [],
 		getDefaultMacroChoice: () => '',
 		isMacroRunning: (macroId: string) => state.macros.some((macro) => macro.id === macroId && macro.running),
-		getSelectableStatuses: () => state.statuses.filter((status) => status.selectable),
+		getSettableStatuses: () => state.statuses.filter((status) => status.selectable),
 		getRunnableMacros: () => state.macros.filter((macro) => macro.runnable),
 		setFeedbackDefinitions: (captured: Definitions) => {
 			definitions = captured
@@ -193,6 +194,8 @@ const groupPresets = (groupId: string) => [
 ]
 const v2Presets = [
 	...v1Presets,
+	// The Public API v1 has no stop.
+	'stop_macro-show',
 	'input_mute_toggle',
 	...groupPresets('everyone'),
 	...groupPresets(crewGroupId),
@@ -329,6 +332,7 @@ describe('the final look over v2 as the offer says', () => {
 		const lit = [
 			'status_sys-green',
 			'macro_macro-show',
+			'stop_macro-show',
 			'dismiss_alerts',
 			...v2Presets.filter((id) => id.endsWith('_mute')),
 		]

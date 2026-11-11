@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
 	isIntegrationIntercomControls,
+	isIntegrationStatusView,
 	isPublicMacroDto,
 	isPublicMacroDtoList,
 	isPublicMacroRemovedEventData,
@@ -88,5 +89,16 @@ describe('intercom controls guard', () => {
 		assert.equal(isIntegrationIntercomControls(withCall({ ...call, talk: { held: 'yes' } })), false)
 		assert.equal(isIntegrationIntercomControls(withCall({ ...call, talk: { held: true, talkKey: 'hold' } })), false)
 		assert.equal(isIntegrationIntercomControls(withCall({ direction: 'incoming', state: 'ringing' })), false)
+	})
+})
+
+describe('status view guard', () => {
+	const view = { id: 'sts-1', builtIn: false, label: 'On air', color: '#ff0000', selectable: true }
+
+	it('takes whose a status is as null, an Entity id or absent, and refuses anything else', () => {
+		assert.equal(isIntegrationStatusView(view), true)
+		assert.equal(isIntegrationStatusView({ ...view, entityId: null }), true)
+		assert.equal(isIntegrationStatusView({ ...view, entityId: 'ent-1' }), true)
+		assert.equal(isIntegrationStatusView({ ...view, entityId: 7 }), false)
 	})
 })

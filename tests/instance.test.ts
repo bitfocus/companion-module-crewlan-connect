@@ -371,7 +371,7 @@ describe('module against a CrewLAN stub', () => {
 	})
 
 	it('registers its full Companion surface', () => {
-		assert.equal(host.registered.actions.length, 19)
+		assert.equal(host.registered.actions.length, 20)
 		assert.equal(host.registered.feedbacks.length, 28)
 		assert.equal(host.registered.variables.length, 25)
 		// Four fixed presets, one per selectable status, one per runnable macro.

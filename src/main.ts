@@ -1,5 +1,12 @@
 import { InstanceBase, InstanceStatus, type InstanceTypes, type SomeCompanionConfigField } from '@companion-module/base'
-import { CrewLanApiClient, CrewLanApiError, isAbortError, type ControlsPatch, type RequestOptions } from './api.js'
+import {
+	CrewLanApiClient,
+	CrewLanApiError,
+	isAbortError,
+	parseTimestamp,
+	type ControlsPatch,
+	type RequestOptions,
+} from './api.js'
 import {
 	CrewLanV2Client,
 	isRequestNotOfferedLocally,
@@ -269,16 +276,6 @@ export function describeAlert(occurredAt: string, scope: 'workspace' | 'entities
 	return scope === 'workspace' ? `Workspace alert at ${when}` : `Alert for this entity at ${when}`
 }
 
-function parseTimestamp(value: string | null | undefined): number | null {
-	if (typeof value !== 'string') {
-		return null
-	}
-
-	const parsed = Date.parse(value)
-
-	return Number.isNaN(parsed) ? null : parsed
-}
-
 /**
  * Decide whether a status/controls payload may replace the one currently held.
  *
@@ -318,6 +315,13 @@ function isEntityPresent(status: PublicEntityStatusDto | null): boolean {
 
 function sameJson(a: unknown, b: unknown): boolean {
 	return a === b || JSON.stringify(a) === JSON.stringify(b)
+}
+
+/** A status picker's choices, or the one placeholder while the status list is not loaded. */
+function toStatusChoices(statuses: readonly PublicStatusDto[]): CrewLanChoice[] {
+	const choices = statuses.map((status) => ({ id: status.id, label: getCompanionStatusLabel(status) }))
+
+	return choices.length > 0 ? choices : [{ id: '', label: '— status list not loaded —' }]
 }
 
 /**
@@ -501,17 +505,24 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		return this.state.statuses.filter((status) => status.selectable)
 	}
 
+	/**
+	 * The selectable statuses the connection may set its target to: those for everyone and its own.
+	 * CrewLAN refuses another Entity's own with `status_not_available`.
+	 */
+	getSettableStatuses(): PublicStatusDto[] {
+		return this.getSelectableStatuses().filter(
+			(status) => status.entityId === undefined || status.entityId === null || status.entityId === this.state.entityId,
+		)
+	}
+
+	/** The status picker of *Set My Status* and the status feedbacks: what the target may be set to. */
 	getStatusChoices(): CrewLanChoice[] {
-		const choices = this.getSelectableStatuses().map((status) => ({
-			id: status.id,
-			label: getCompanionStatusLabel(status),
-		}))
+		return toStatusChoices(this.getSettableStatuses())
+	}
 
-		if (choices.length > 0) {
-			return choices
-		}
-
-		return [{ id: '', label: '— status list not loaded —' }]
+	/** The status picker of the indicator action and feedbacks: every selectable status, an indicator's own among them. */
+	getIndicatorStatusChoices(): CrewLanChoice[] {
+		return toStatusChoices(this.getSelectableStatuses())
 	}
 
 	getDefaultStatusChoice(): string {
@@ -630,7 +641,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		}
 
 		if (this.state.statuses.length > 0 && !this.state.statuses.some((status) => status.id === requestedId)) {
-			const known = this.getSelectableStatuses()
+			const known = this.getSettableStatuses()
 				.map((status) => status.id)
 				.join(', ')
 			this.log('warn', `Set My Status: CrewLAN has no status with id "${requestedId}". Known ids: ${known}`)
@@ -642,7 +653,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		const generation = this.generation
 		const result = await api.setEntityStatus(entityId, requestedId, this.requestOptions())
 
-		if (generation !== this.generation) {
+		if (!this.isCurrent(generation)) {
 			return
 		}
 
@@ -712,7 +723,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		const generation = this.generation
 		const indicators = await api.setIndicatorStatus(requestedIndicator, requestedStatus, this.requestOptions())
 
-		if (generation !== this.generation) {
+		if (!this.isCurrent(generation)) {
 			return
 		}
 
@@ -722,14 +733,43 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	}
 
 	/**
-	 * Start a macro. One-shot: CrewLAN answers with the updated macro, and a 409 for a macro that is
-	 * already running surfaces as an ordinary action failure without touching the connection.
+	 * Start a macro. CrewLAN answers with the updated macro, and a 409 for a macro that is already
+	 * running surfaces as an ordinary action failure without touching the connection.
 	 */
 	async runCrewLanMacro(macroId: string): Promise<void> {
+		await this.sendMacroRequest('Run Macro', macroId, async (id) =>
+			this.requireApi().runMacro(id, this.requestOptions()),
+		)
+	}
+
+	/**
+	 * Stop a macro's run, whoever started it, v2 only: the Public API v1 has no stop. A 409 for a
+	 * macro nothing of which runs surfaces as an ordinary action failure, as a run's does.
+	 */
+	async stopCrewLanMacro(macroId: string): Promise<void> {
+		const api = this.requireApi()
+
+		if (!(api instanceof CrewLanV2Client)) {
+			this.log(
+				'warn',
+				'Stop Macro needs a CrewLAN Workspace serving /api/v2; the Public API v1 this one speaks has no stop.',
+			)
+			return
+		}
+
+		await this.sendMacroRequest('Stop Macro', macroId, async (id) => api.stopMacro(id, this.requestOptions()))
+	}
+
+	/** Sends a run's or a stop's request for the macro `macroId` names, and applies its answer. */
+	private async sendMacroRequest(
+		actionName: string,
+		macroId: string,
+		send: (macroId: string) => Promise<PublicMacroDto>,
+	): Promise<void> {
 		const requestedId = macroId.trim()
 
 		if (requestedId.length === 0) {
-			this.log('warn', 'Run Macro: no macro selected. Pick one once the connection is up, or type a macro id.')
+			this.log('warn', `${actionName}: no macro selected. Pick one once the connection is up, or type a macro id.`)
 			return
 		}
 
@@ -737,24 +777,24 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			const known = this.getRunnableMacros()
 				.map((macro) => macro.id)
 				.join(', ')
-			this.log('warn', `Run Macro: CrewLAN has no macro with id "${requestedId}". Known ids: ${known}`)
+			this.log('warn', `${actionName}: CrewLAN has no macro with id "${requestedId}". Known ids: ${known}`)
 			return
 		}
 
 		const api = this.requireApi()
 		this.requireEntityId()
 		const generation = this.generation
-		const macro = await api.runMacro(requestedId, this.requestOptions())
+		const macro = await send(requestedId)
 
-		if (generation !== this.generation) {
+		if (!this.isCurrent(generation)) {
 			return
 		}
 
 		this.lastLocalWriteAt = Date.now()
 		this.notePresent()
 		// Over v2 a run leaves the macro's updatedAt as it was, so its answer, arriving after a fast
-		// run's macroRunEnded, would light it again: there `running` comes from the run events and
-		// the snapshot alone.
+		// run's macroRunEnded, would light it again, and a stop's after a new run's start would dim
+		// it: there `running` comes from the run events and the snapshot alone.
 		const held = this.state.macros.find((candidate) => candidate.id === macro.id)
 		this.applyMacroUpdate(
 			api instanceof CrewLanV2Client ? { ...macro, running: held?.running ?? false } : macro,
@@ -856,8 +896,9 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		}
 
 		await this.enqueueListenWrite(async () => {
-			// Nothing announces the Entity's own listening, so a toggle decides from a fresh read, as
-			// Output's toggle does from currentControls().
+			// Nothing announces a listening the Entity's own Client set, and a CrewLAN predating
+			// `listeningChanged` announces none, so a toggle decides from a fresh read, as Output's toggle
+			// does from currentControls().
 			if (mode === 'toggle' && Date.now() - this.groupsRefreshedAt > this.pollIntervalMs()) {
 				await this.refreshIntercom(this.generation, 'groups')
 			}
@@ -872,7 +913,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			const generation = this.generation
 			await api.setListening(groupId, muted, this.requestOptions())
 
-			if (generation === this.generation) {
+			if (this.isCurrent(generation)) {
 				this.lastLocalWriteAt = Date.now()
 				this.notePresent()
 				this.updateState({ intercom: api.intercomState(), lastError: '' })
@@ -1017,7 +1058,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		const generation = this.generation
 		const controls = await api.setControls(entityId, body, this.requestOptions(options))
 
-		if (generation !== this.generation) {
+		if (!this.isCurrent(generation)) {
 			return
 		}
 
@@ -1043,7 +1084,8 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		}
 
 		this.clearAlertTimer()
-		this.updateState({ lastAlert: '', lastError: '' })
+		// The alerts are dismissed either way; the error a failed poll left meanwhile stays.
+		this.updateState({ lastAlert: '', ...(this.state.connected ? { lastError: '' } : {}) })
 	}
 
 	// ---------------------------------------------------------------------------
@@ -1666,6 +1708,14 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			case 'intercom.event.memberRemoved':
 				void this.refreshIntercom(generation, 'groups')
 				return
+			case 'intercom.event.listeningChanged':
+				// Said where one of the Entity's connections or a macro's step set its listening, and read
+				// as a Client reads it, by reading the groups again. A caller's direct calls name no group,
+				// and no button shows their listening.
+				if (payload.entityId === this.state.entityId && typeof payload.groupId === 'string') {
+					void this.refreshIntercom(generation, 'groups')
+				}
+				return
 			case 'status.event.indicatorStatusChanged':
 			case 'entities.event.indicatorUpdated':
 				this.applyIndicatorEvent(event, generation)
@@ -2088,7 +2138,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		const requestedAt = Date.now()
 		const controls = await api.getEntityControls(entityId, this.requestOptions())
 
-		if (generation !== this.generation) {
+		if (!this.isCurrent(generation)) {
 			return controls
 		}
 
@@ -2102,7 +2152,7 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		const generation = this.generation
 		const controls = await api.patchEntityControls(entityId, patch, this.requestOptions(options))
 
-		if (generation !== this.generation) {
+		if (!this.isCurrent(generation)) {
 			return
 		}
 
@@ -2183,6 +2233,15 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		}
 
 		this.updateState({ lastError: message })
+	}
+
+	/**
+	 * Whether an answer to a request sent at `generation` may still change what the buttons show:
+	 * the same connection, and still connected. A failed poll clears the state without a new
+	 * generation, and an answer arriving after it must not bring old state back.
+	 */
+	private isCurrent(generation: number): boolean {
+		return generation === this.generation && this.state.connected
 	}
 
 	private requireApi(): CrewLanApiClient | CrewLanV2Client {
@@ -2297,6 +2356,8 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 	 * a macro only re-checks feedbacks while a rename or a new macro re-registers the definitions.
 	 */
 	private definitionsKey(): string {
+		const settable = new Set(this.getSettableStatuses().map((status) => status.id))
+
 		return JSON.stringify({
 			// Over v1 the Intercom presets hold the one Talk and Output; over v2 one set per group.
 			api: this.state.api,
@@ -2304,11 +2365,13 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 			requests: this.state.requests,
 			indicators: this.state.indicators.map((indicator) => [indicator.id, indicator.name, indicator.statusIds]),
 			groups: (this.state.intercom?.groups ?? []).map((group) => [group.id, group.name]),
+			// Every selectable status is an indicator's choice; the settable ones are the target's too.
 			statuses: this.getSelectableStatuses().map((status) => [
 				status.id,
 				getCompanionStatusLabel(status),
 				status.colors.backgroundColor,
 				status.colors.foregroundColor,
+				settable.has(status.id),
 			]),
 			macros: this.getRunnableMacros().map((macro) => [
 				macro.id,

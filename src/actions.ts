@@ -43,6 +43,11 @@ export type ActionsSchema = {
 			macroId: string
 		}
 	}
+	stop_macro: {
+		options: {
+			macroId: string
+		}
+	}
 	input_mute: {
 		options: {
 			mode: MuteMode
@@ -110,6 +115,7 @@ export const actionRequests: Readonly<Record<keyof ActionsSchema, readonly strin
 	dismiss_alerts: [wireRequests.acknowledgeAlerts],
 	refresh: [],
 	run_macro: [wireRequests.runMacro],
+	stop_macro: [wireRequests.stopMacro],
 	input_mute: [wireRequests.setControls],
 	group_talk_push_down: [wireRequests.setControls],
 	group_talk_push_up: [wireRequests.setControls],
@@ -168,6 +174,21 @@ function reportPlacement(
 	}
 
 	return definitions
+}
+
+/** The macro picker of *Run Macro* and *Stop Macro*: the macros this connection may run. A typed id is accepted. */
+function macroOption(self: ModuleInstance): CompanionInputFieldDropdown<'macroId', string> {
+	return {
+		id: 'macroId',
+		type: 'dropdown',
+		label: 'Macro',
+		default: self.getDefaultMacroChoice(),
+		choices: self.getMacroChoices(),
+		allowCustom: true,
+		regex: macroIdRegex,
+		tooltip: 'Pick a CrewLAN macro, or type a macro id to configure the button before the connection is up.',
+		description: 'Macro ids can be typed, so buttons can be built before the connection is up.',
+	}
 }
 
 /** Regex string (Companion format) for a typed intercom group id: `everyone`, or `grp-` and 32 hex digits. */
@@ -304,23 +325,21 @@ export function UpdateActions(self: ModuleInstance): void {
 		},
 		run_macro: {
 			name: 'Run Macro',
-			description: 'Starts a CrewLAN macro. One-shot: there is no stop or toggle.',
-			options: [
-				{
-					id: 'macroId',
-					type: 'dropdown',
-					label: 'Macro',
-					default: self.getDefaultMacroChoice(),
-					choices: self.getMacroChoices(),
-					allowCustom: true,
-					regex: macroIdRegex,
-					tooltip: 'Pick a CrewLAN macro, or type a macro id to configure the button before the connection is up.',
-					description: 'Macro ids can be typed, so buttons can be built before the connection is up.',
-				},
-			],
+			description: 'Starts a CrewLAN macro. "Stop Macro" stops its run.',
+			options: [macroOption(self)],
 			callback: async (event) => {
 				await self.runCrewLanAction('Run Macro', async () => {
 					await self.runCrewLanMacro(String(event.options.macroId ?? ''))
+				})
+			},
+		},
+		stop_macro: {
+			name: 'Stop Macro',
+			description: 'Stops the run under way of a CrewLAN macro, whoever started it. Needs a Workspace serving /api/v2.',
+			options: [macroOption(self)],
+			callback: async (event) => {
+				await self.runCrewLanAction('Stop Macro', async () => {
+					await self.stopCrewLanMacro(String(event.options.macroId ?? ''))
 				})
 			},
 		},
@@ -496,7 +515,7 @@ export function UpdateActions(self: ModuleInstance): void {
 					type: 'dropdown',
 					label: 'Status',
 					default: self.getDefaultStatusChoice(),
-					choices: self.getStatusChoices(),
+					choices: self.getIndicatorStatusChoices(),
 					allowCustom: true,
 					regex: statusIdRegex,
 					tooltip: 'Pick a CrewLAN status, or type a status id to configure the button before the connection is up.',

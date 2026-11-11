@@ -2,6 +2,7 @@ import {
 	CrewLanApiClient,
 	CrewLanApiError,
 	describeCause,
+	parseTimestamp,
 	truncate,
 	type ControlsPatch,
 	type CrewLanApiLogger,
@@ -75,6 +76,7 @@ export const integrationEventTypes = [
 	'intercom.event.groupRemoved',
 	'intercom.event.memberAdded',
 	'intercom.event.memberRemoved',
+	'intercom.event.listeningChanged',
 	'status.event.indicatorStatusChanged',
 	'entities.event.indicatorUpdated',
 ] as const
@@ -89,6 +91,7 @@ export const wireRequests = {
 	listGroups: 'intercom.query.listGroups',
 	listMacros: 'macros.query.listMacros',
 	runMacro: 'macros.command.runMacro',
+	stopMacro: 'macros.command.stopMacro',
 	acknowledgeAlerts: 'alerts.command.acknowledgeAlerts',
 } as const
 
@@ -177,6 +180,7 @@ export function toPublicStatus(view: IntegrationStatusView): PublicStatusDto {
 		colors: colorsOf(view.color),
 		...(view.animation === undefined ? {} : { motionPreset: view.animation }),
 		selectable: view.selectable,
+		...(view.entityId === undefined ? {} : { entityId: view.entityId }),
 	}
 }
 
@@ -372,7 +376,7 @@ function isAcknowledged(value: unknown): value is { acknowledged: unknown[] } {
 
 /**
  * The `/api/v2` client of one connection. It keeps what translating needs between requests — the
- * status catalogue, the participants' names, the last controls and groups, the indicators' names —
+ * status catalogue, the participants' names, the newest controls and the last groups, the indicators' names —
  * each replaced by the next snapshot, and what the connection may request now: `GET /api/v2`'s
  * offer, replaced by every `offer` record its stream writes. **A request the offer does not hold is
  * never sent**: it is refused here, so the module follows what CrewLAN says it may do and keeps no
@@ -383,6 +387,10 @@ export class CrewLanV2Client {
 	private statuses: PublicStatusDto[] = []
 	private participants = new Map<string, string>()
 	private controls: IntegrationIntercomControls | null = null
+	/** Counts each controls request as it is sent and each `setControls` answer as it is taken. */
+	private controlsClock = 0
+	/** The clock when the last `setControls` answer was taken: a read sent before it may be older. */
+	private controlsWrittenAt = 0
 	private groups: IntegrationGroupView[] = []
 	private entityId: string | null = null
 	private indicatorViews = new Map<string, IntegrationIndicatorView>()
@@ -466,6 +474,7 @@ export class CrewLanV2Client {
 	 * neither, and asks for neither.
 	 */
 	async loadSnapshot(options: RequestOptions = {}): Promise<IntegrationState> {
+		const controlsSentAt = ++this.controlsClock
 		const [snapshot, controls, groups] = await Promise.all([
 			this.http.request('/api/v2/snapshot', {}, options, isItemResponse(isIntegrationSnapshot)),
 			this.offers(wireRequests.getControls)
@@ -477,10 +486,19 @@ export class CrewLanV2Client {
 		])
 		const { workspace, entity, participants, statuses, macros } = snapshot.data
 		const entityId = entity.id
+
+		// Another target — the connection given a status indicator — keeps no controls of the one it left.
+		if (controls === null || entityId !== this.entityId) {
+			this.controls = null
+		}
+
+		if (controls !== null) {
+			this.keepControls(controls, controlsSentAt)
+		}
+
 		this.entityId = entityId
 		this.statuses = statuses.statuses.map(toPublicStatus)
 		this.participants = new Map(participants.map((participant) => [participant.id, participant.displayIdentity]))
-		this.controls = controls
 		this.groups = groups?.groups ?? []
 		this.indicatorViews = new Map((statuses.indicators ?? []).map((view) => [view.id, view]))
 		const standing = statuses.entities.find((candidate) => candidate.entityId === entityId)
@@ -525,10 +543,13 @@ export class CrewLanV2Client {
 		return toIntercomState(this.entityId, this.groups, this.controls, this.participants)
 	}
 
+	/** Reads the controls, answered as read; the module decides itself whether they are newer than its own. */
 	async getEntityControls(entityId: string, options: RequestOptions = {}): Promise<PublicEntityControlsDto> {
-		this.controls = await this.ask(wireRequests.getControls, {}, isIntegrationIntercomControls, options)
+		const sentAt = ++this.controlsClock
+		const controls = await this.ask(wireRequests.getControls, {}, isIntegrationIntercomControls, options)
 
-		return toPublicControls(entityId, this.controls)
+		this.keepControls(controls, sentAt)
+		return toPublicControls(entityId, controls)
 	}
 
 	/** v1's controls patch as `intercom.command.setControls`: Output and Global Talk. */
@@ -561,9 +582,38 @@ export class CrewLanV2Client {
 		body: IntegrationControlsBody,
 		options: RequestOptions = {},
 	): Promise<PublicEntityControlsDto> {
-		this.controls = await this.ask(wireRequests.setControls, body, isIntegrationIntercomControls, options)
+		const controls = await this.ask(wireRequests.setControls, body, isIntegrationIntercomControls, options)
 
-		return toPublicControls(entityId, this.controls)
+		this.keepControls(controls, null)
+		return toPublicControls(entityId, controls)
+	}
+
+	/**
+	 * Holds a controls answer as the one the Intercom state is built from, unless it is older than
+	 * the one held, by the rule the module applies to the controls it shows (`main.ts` `pickFresher`),
+	 * with `setControls` as the writes: the later `changedAt` where both carry a different one,
+	 * otherwise every write's answer, and a read's where it was sent after the last write's answer
+	 * was taken. An older answer held would
+	 * bring back, at the next groups read, what a later write changed. `readSentAt` is null for a
+	 * write's answer.
+	 */
+	private keepControls(answer: IntegrationIntercomControls, readSentAt: number | null): void {
+		const held = this.controls
+		const answerAt = parseTimestamp(answer.changedAt)
+		const heldAt = parseTimestamp(held?.changedAt)
+		const newer =
+			held === null ||
+			(answerAt !== null && heldAt !== null && answerAt !== heldAt
+				? answerAt > heldAt
+				: readSentAt === null || readSentAt > this.controlsWrittenAt)
+
+		if (newer) {
+			this.controls = answer
+		}
+
+		if (readSentAt === null) {
+			this.controlsWrittenAt = ++this.controlsClock
+		}
 	}
 
 	/** Mutes or unmutes one group, `muted` alone so the level stays, then reads the groups again. */
@@ -661,6 +711,17 @@ export class CrewLanV2Client {
 	async runMacro(macroId: string, options: RequestOptions = {}): Promise<PublicMacroDto> {
 		return toPublicMacro(
 			await this.ask(wireRequests.runMacro, { macroId }, isIntegrationMacroView, options),
+			this.mayRunMacros,
+		)
+	}
+
+	/**
+	 * Stops the run under way of a macro, whoever started it, answered with the macro. A macro
+	 * nothing of which runs is refused `409 macro_not_running`.
+	 */
+	async stopMacro(macroId: string, options: RequestOptions = {}): Promise<PublicMacroDto> {
+		return toPublicMacro(
+			await this.ask(wireRequests.stopMacro, { macroId }, isIntegrationMacroView, options),
 			this.mayRunMacros,
 		)
 	}

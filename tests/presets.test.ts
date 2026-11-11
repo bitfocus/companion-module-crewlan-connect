@@ -35,7 +35,7 @@ describe('Companion presets', () => {
 		let capturedStructure: CompanionPresetSection<ModuleSchema>[] | undefined
 		const status = createStatus({ id: 'sys-idle', label: 'Idle' })
 		const self = {
-			getSelectableStatuses: () => [status],
+			getSettableStatuses: () => [status],
 			getRunnableMacros: () => [],
 			getCrewLanState: () => presetState(),
 			setPresetDefinitions: (
@@ -96,7 +96,7 @@ describe('Companion macro presets', () => {
 		let capturedPresets: CompanionPresetDefinitions<ModuleSchema> | undefined
 		let capturedStructure: CompanionPresetSection<ModuleSchema>[] | undefined
 		const self = {
-			getSelectableStatuses: () => [],
+			getSettableStatuses: () => [],
 			getRunnableMacros: () => macros,
 			getCrewLanState: () => presetState(),
 			setPresetDefinitions: (
@@ -183,7 +183,7 @@ describe('Companion intercom presets', () => {
 		let capturedStructure: CompanionPresetSection<ModuleSchema>[] | undefined
 		const self = {
 			label: 'crewlan',
-			getSelectableStatuses: () => [],
+			getSettableStatuses: () => [],
 			getRunnableMacros: () => [],
 			getCrewLanState: () => state,
 			setPresetDefinitions: (

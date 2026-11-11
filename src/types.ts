@@ -69,6 +69,12 @@ export interface PublicStatusDto {
 	 */
 	motionPreset?: string
 	selectable: boolean
+	/**
+	 * Over `/api/v2`, whose status it is: null for everyone, an Entity's id for that Entity alone,
+	 * which CrewLAN lets no other set its status to. Absent over the Public API v1 and from a CrewLAN
+	 * whose status view does not carry it: for everyone.
+	 */
+	entityId?: string | null
 }
 
 export interface PublicEntityDto {
@@ -129,8 +135,8 @@ export type PublicEventType =
 /**
  * A CrewLAN macro as the Public API publishes it.
  *
- * A macro is one-shot: Companion can start it, and the only state it reports back is whether a run
- * is currently in progress.
+ * Companion can start a macro and, over `/api/v2`, stop its run; the only state it reports back is
+ * whether a run is currently in progress.
  */
 export interface PublicMacroDto {
 	id: string
@@ -348,6 +354,8 @@ export interface IntegrationStatusView {
 	selectable: boolean
 	/** Not validated; read only as the status's freshness. */
 	updatedAt?: string | null
+	/** Null for everyone, an Entity's id for that Entity alone; absent from a CrewLAN that predates it. */
+	entityId?: string | null
 }
 
 /** What one Entity stands at: `statusId` what everybody sees, `chosenStatusId` what it chose. */

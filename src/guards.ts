@@ -237,7 +237,8 @@ export function isIntegrationStatusView(value: unknown): value is IntegrationSta
 		isBoolean(value.builtIn) &&
 		isNullableString(value.label) &&
 		isString(value.color) &&
-		isBoolean(value.selectable)
+		isBoolean(value.selectable) &&
+		(value.entityId === undefined || isNullableString(value.entityId))
 	)
 }
 

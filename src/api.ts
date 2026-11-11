@@ -216,6 +216,17 @@ export function truncate(value: string, maxLength = 200): string {
 	return value.length > maxLength ? `${value.slice(0, maxLength)}…` : value
 }
 
+/** A CrewLAN instant as milliseconds since the epoch, or null where there is none or it is unreadable. */
+export function parseTimestamp(value: string | null | undefined): number | null {
+	if (typeof value !== 'string') {
+		return null
+	}
+
+	const parsed = Date.parse(value)
+
+	return Number.isNaN(parsed) ? null : parsed
+}
+
 /** One dispatched event-stream frame: its `event:` name (`message` where it named none) and its data. */
 export interface ServerSentEventFrame {
 	event: string

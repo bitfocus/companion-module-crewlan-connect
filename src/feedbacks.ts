@@ -84,7 +84,7 @@ function indicatorStatusOption(self: ModuleInstance) {
 		type: 'dropdown',
 		label: 'Status',
 		default: self.getDefaultStatusChoice(),
-		choices: self.getStatusChoices(),
+		choices: self.getIndicatorStatusChoices(),
 		allowCustom: true,
 		regex: statusIdRegex,
 		tooltip: 'Pick a CrewLAN status, or type a status id to configure the button before the connection is up.',

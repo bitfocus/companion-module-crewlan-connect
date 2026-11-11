@@ -107,6 +107,14 @@ describe('v2 translation', () => {
 		)
 	})
 
+	it('carries whose a status is where CrewLAN says it', () => {
+		const custom = { id: 'sts-1', builtIn: false, label: 'On air', color: '#FF0000', selectable: true }
+
+		assert.equal(toPublicStatus({ ...custom, entityId: 'ent-1' }).entityId, 'ent-1')
+		assert.equal(toPublicStatus({ ...custom, entityId: null }).entityId, null)
+		assert.equal('entityId' in toPublicStatus(custom), false)
+	})
+
 	it('maps Output to v1 listen and Global Talk to v1 talk, available during a call too', () => {
 		assert.deepEqual(toPublicControls('ent-1', controls), {
 			entityId: 'ent-1',

@@ -23,6 +23,7 @@ function actions(): { definitions: Record<string, { callback: Callback }>; calls
 	const self = {
 		getCrewLanState: () => ({ intercom: null, indicators: [] }),
 		getStatusChoices: () => [],
+		getIndicatorStatusChoices: () => [],
 		getDefaultStatusChoice: () => '',
 		getMacroChoices: () => [],
 		getDefaultMacroChoice: () => '',
@@ -38,6 +39,8 @@ function actions(): { definitions: Record<string, { callback: Callback }>; calls
 		setCallTalk: record('setCallTalk'),
 		setCallTalkLatchMode: record('setCallTalkLatchMode'),
 		hangUpCall: record('hangUpCall'),
+		runCrewLanMacro: record('runCrewLanMacro'),
+		stopCrewLanMacro: record('stopCrewLanMacro'),
 		setActionDefinitions: (captured: Record<string, { callback: Callback }>) => {
 			definitions = captured
 		},
@@ -140,6 +143,22 @@ describe('Companion intercom actions', () => {
 	})
 })
 
+describe('Companion macro actions', () => {
+	it('runs and stops the macro the option names', async () => {
+		const { definitions, calls } = actions()
+
+		await definitions.run_macro?.callback({ options: { macroId: 'mac-1' } })
+		await definitions.stop_macro?.callback({ options: { macroId: 'mac-1' } })
+
+		assert.deepEqual(calls, [
+			['runCrewLanAction', 'Run Macro'],
+			['runCrewLanMacro', 'mac-1'],
+			['runCrewLanAction', 'Stop Macro'],
+			['stopCrewLanMacro', 'mac-1'],
+		])
+	})
+})
+
 describe('Companion action placement', () => {
 	type Placement = (action: CompanionActionInfo) => void
 
@@ -204,5 +223,12 @@ describe('Companion action placement', () => {
 		assert.equal(isConnectionReady(instance, 'btn'), false)
 		definitions().run_macro?.unsubscribe?.({ id: 'act-2', controlId: 'btn', actionId: 'run_macro', options: {} })
 		assert.equal(isConnectionReady(instance, 'btn'), true)
+	})
+
+	it('greys a Stop Macro button while the offer withholds the stop, though it holds the run', () => {
+		const { instance, definitions } = placedModule([wireRequests.runMacro])
+
+		definitions().stop_macro?.subscribe?.({ id: 'act-1', controlId: 'btn', actionId: 'stop_macro', options: {} })
+		assert.equal(isConnectionReady(instance, 'btn'), false)
 	})
 })

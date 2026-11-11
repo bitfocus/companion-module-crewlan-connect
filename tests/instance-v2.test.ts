@@ -24,6 +24,10 @@ interface Fake {
 	statusId: string
 	/** Per wire id: a refusal to answer instead of the outcome, `delayMs` later where it is given. */
 	refuse: Map<string, { status: number; error: string; message: string; delayMs?: number }>
+	/** Per wire id: how long its outcome takes to answer. */
+	delays: Map<string, number>
+	/** The custom statuses the snapshot lists after the built-in ones. */
+	customStatuses: object[]
 	/** What `GET /api/v2` offers; a request it does not hold is refused `403 request_not_offered`, as CrewLAN does. */
 	offer: { requests: string[]; indicators: IntegrationIndicatorOffer[] }
 	/** How long `GET /api/v2` takes to answer the offer as it stood when it was asked. */
@@ -76,6 +80,8 @@ async function startFake(): Promise<Fake> {
 		snapshotDelayMs: 0,
 		statusId: 'ready',
 		refuse: new Map(),
+		delays: new Map(),
+		customStatuses: [],
 		offer: { requests: Object.values(wireRequests), indicators: [] },
 		offerDelayMs: 0,
 		entity: { id: 'ent-1', displayIdentity: 'Desk', protected: false },
@@ -97,11 +103,20 @@ async function startFake(): Promise<Fake> {
 		request.on('end', () => {
 			const path = request.url ?? ''
 			fake.requests.push({ path, body: text.length > 0 ? JSON.parse(text) : null })
-			const json = (code: number, body: unknown): void => {
-				response.writeHead(code, { 'content-type': 'application/json' })
-				response.end(JSON.stringify(body))
-			}
 			const wireId = path.replace('/api/v2/requests/', '')
+			const delayMs = fake.delays.get(wireId)
+			const json = (code: number, body: unknown): void => {
+				const answer = () => {
+					response.writeHead(code, { 'content-type': 'application/json' })
+					response.end(JSON.stringify(body))
+				}
+
+				if (delayMs === undefined) {
+					answer()
+				} else {
+					setTimeout(answer, delayMs)
+				}
+			}
 			const refusal = fake.refuse.get(wireId)
 
 			if (refusal !== undefined) {
@@ -159,6 +174,26 @@ async function startFake(): Promise<Fake> {
 						80,
 					)
 					return
+				case '/api/v2/requests/macros.command.stopMacro':
+					// Another run starts the moment this one stops, before the stop's answer arrives.
+					fake.event('macros.event.macroRunEnded', { macroId: 'mac-1', runId: 'run-9', outcome: 'stopped' })
+					fake.event('macros.event.macroRunStarted', { macroId: 'mac-1', runId: 'run-10' })
+					setTimeout(
+						() =>
+							json(200, {
+								data: {
+									id: 'mac-1',
+									name: 'Doors',
+									color: '#1D71C7',
+									running: false,
+									runStartedAt: null,
+									updatedAt: null,
+									runnable: true,
+								},
+							}),
+						80,
+					)
+					return
 				case '/api/v2/snapshot': {
 					const running = fake.snapshotMacroRunning
 					setTimeout(
@@ -174,6 +209,7 @@ async function startFake(): Promise<Fake> {
 											status('ready', '#30D158'),
 											status('attention', '#FFD60A'),
 											status('offline', '#4D5968'),
+											...fake.customStatuses,
 										],
 										former: [],
 										entities: [
@@ -570,6 +606,75 @@ describe('module against a Workspace serving /api/v2', () => {
 		fake.groups = [everyone, stage]
 	})
 
+	it('reads the groups again on listeningChanged, so a group Mute key follows a mute set elsewhere', async () => {
+		const [everyone, stage] = fake.groups as [object, { listening: { gainDb: number; muted: boolean } }]
+		const muted = () => host.instance.getCrewLanState().intercom?.groups[1]?.muted
+		const said = (value: boolean) =>
+			fake.event('intercom.event.listeningChanged', {
+				entityId: 'ent-1',
+				groupId: 'grp-stage',
+				gainDb: -6,
+				muted: value,
+			})
+		assert.ok(
+			fake.requests.some(
+				(request) =>
+					request.path.startsWith('/api/v2/events?types=') && request.path.includes('intercom.event.listeningChanged'),
+			),
+		)
+		// The toggle before answered Stage muted, as the Workspace then held it; it holds it unmuted now.
+		said(false)
+		await waitFor(() => muted() === false, 'the Mute key to follow the unmute')
+		const checked = host.checked.length
+
+		// Another connection of the participant's muted Stage.
+		fake.groups = [everyone, { ...stage, listening: { ...stage.listening, muted: true } }]
+		said(true)
+		await waitFor(() => muted() === true, 'the Mute key to follow the mute')
+		assert.ok(host.checked.slice(checked).includes('group_muted'))
+		fake.groups = [everyone, stage]
+		said(false)
+		await waitFor(() => muted() === false, 'the Mute key to follow the unmute again')
+	})
+
+	it('builds the Intercom from the newest controls, never from an older read answered after a write', async () => {
+		const now = Date.now()
+		const older = { ...fake.controls, inputMuted: false, changedAt: new Date(now).toISOString() }
+		const written = { ...fake.controls, inputMuted: true, changedAt: new Date(now + 1000).toISOString() }
+		fake.controls = older
+		fake.slowControls = true
+		await waitFor(() => fake.controlsInFlight > 0, 'a controls read in flight', 3000)
+		fake.controls = written
+		await host.instance.setInputMuteMode('on')
+		// The read in flight answers what stood before the write.
+		fake.controls = older
+		await waitFor(() => fake.controlsInFlight === 0, 'the read to answer', 3000)
+		fake.slowControls = false
+		const groupReads = bodies(wireRequests.listGroups).length
+
+		fake.event('intercom.event.groupChanged', { groupId: 'grp-stage' })
+		await waitFor(() => bodies(wireRequests.listGroups).length > groupReads, 'the groups to be read again')
+		await sleep(50)
+
+		assert.equal(host.instance.getCrewLanState().intercom?.inputMuted, true)
+		assert.equal(host.instance.getCrewLanState().controls?.shoutbox.listen.muted, written.outputMuted)
+		fake.controls = { ...written, changedAt: new Date(now + 2000).toISOString() }
+	})
+
+	it('stops a macro with macros.command.stopMacro, and keeps it lit for the run that started after the stop', async () => {
+		assert.ok(host.presets.includes('stop_mac-1'), host.presets.join(','))
+		fake.event('macros.event.macroRunStarted', { macroId: 'mac-1', runId: 'run-9' })
+		await waitFor(() => host.instance.isMacroRunning('mac-1'), 'the macro to run')
+
+		await host.instance.runCrewLanAction('Stop Macro', async () => host.instance.stopCrewLanMacro('mac-1'))
+
+		assert.deepEqual(bodies(wireRequests.stopMacro), [{ macroId: 'mac-1' }])
+		// The stop's answer says the macro does not run; the run events after the stop say it does.
+		assert.equal(host.instance.isMacroRunning('mac-1'), true)
+		fake.event('macros.event.macroRunEnded', { macroId: 'mac-1', runId: 'run-10', outcome: 'completed' })
+		await waitFor(() => !host.instance.isMacroRunning('mac-1'), 'the later run to end')
+	})
+
 	it('keeps a run event over a snapshot that was asked for before it', async () => {
 		fake.event('macros.event.macroRunStarted', { macroId: 'mac-1', runId: 'run-7' })
 		await waitFor(() => host.instance.isMacroRunning('mac-1'), 'the macro to run')
@@ -743,6 +848,23 @@ describe('module following what /api/v2 says the connection may do', () => {
 		fake.entity = { id: 'ent-1', displayIdentity: 'Desk', protected: false, kind: 'identity', attends: true }
 		fake.indicators = [{ id: indicatorId, displayIdentity: 'Stage door · Light', statusId: 'ready', since: null }]
 		fake.offer.indicators = [{ indicatorId, statusIds: ['ready', 'attention'] }]
+		const custom = (id: string, entityId: string | null): object => ({
+			id,
+			builtIn: false,
+			label: id,
+			color: '#1d71c7',
+			animation: 'none',
+			selectable: true,
+			updatedAt: null,
+			entityId,
+		})
+		// The participant's own, another participant's, one for everyone and the indicator's own.
+		fake.customStatuses = [
+			custom('sts-own', 'ent-1'),
+			custom('sts-other', 'ent-bob'),
+			custom('sts-all', null),
+			custom('sts-door', indicatorId),
+		]
 		host = createHost()
 		await host.instance.init({ baseUrl: `http://127.0.0.1:${String(fake.port)}`, pollIntervalMs: 1000 }, true, {
 			entityToken: 'con_test',
@@ -766,6 +888,24 @@ describe('module following what /api/v2 says the connection may do', () => {
 		assert.ok(host.presets.includes(`indicator_${indicatorId}_sys-yellow`))
 		assert.ok(host.presets.includes('talk_push'))
 		assert.ok(host.presets.includes('status_sys-green'))
+	})
+
+	it('offers Set My Status and its presets what the target may be set to, and the indicator pickers every status', () => {
+		const ids = (choices: { id: string }[]) => choices.map((choice) => choice.id)
+
+		assert.deepEqual(ids(host.instance.getStatusChoices()), ['sys-green', 'sys-yellow', 'sts-own', 'sts-all'])
+		assert.deepEqual(ids(host.instance.getIndicatorStatusChoices()), [
+			'sys-green',
+			'sys-yellow',
+			'sts-own',
+			'sts-other',
+			'sts-all',
+			'sts-door',
+		])
+		assert.ok(host.presets.includes('status_sts-own'))
+		assert.ok(host.presets.includes('status_sts-all'))
+		assert.ok(!host.presets.includes('status_sts-other'))
+		assert.ok(!host.presets.includes('status_sts-door'))
 	})
 
 	it('sets an indicator to a status it may set, and refuses another before sending it', async () => {
@@ -942,6 +1082,47 @@ describe('module following what /api/v2 says the connection may do', () => {
 			"the indicator's presets alone",
 		)
 		assert.equal(host.instance.isControlOffered('btn-status'), false)
+	})
+})
+
+describe('module whose read fails while a write is answered', () => {
+	let fake: Fake
+	let host: Host
+
+	before(async () => {
+		fake = await startFake()
+		host = createHost()
+		await host.instance.init({ baseUrl: `http://127.0.0.1:${String(fake.port)}`, pollIntervalMs: 1000 }, true, {
+			entityToken: 'con_test',
+		})
+		await waitFor(() => host.status === 'ok', 'the connection to report ok')
+		await waitFor(() => fake.streams > 0, 'the event stream to open')
+	})
+
+	after(async () => {
+		await host.instance.destroy()
+		await fake.close()
+	})
+
+	it('drops an answer that arrives after a failed read, so the cleared state and its error stay', async () => {
+		fake.delays.set(wireRequests.setEntityStatus, 400)
+		const write = host.instance.setCrewLanStatus('sys-yellow')
+		await sleep(50)
+		fake.refuse.set('/api/v2/snapshot', {
+			status: 503,
+			error: 'snapshot_unavailable',
+			message: 'the Workspace could not be read whole',
+		})
+		fake.send('event: gap\ndata: {}\n\n')
+		await waitFor(() => !host.instance.getCrewLanState().connected, 'the failed read to clear the state')
+		const error = host.variables.last_error
+
+		await write
+
+		assert.equal(host.instance.getCrewLanState().connected, false)
+		assert.equal(host.instance.getCrewLanState().status, null)
+		assert.notEqual(error, '')
+		assert.equal(host.variables.last_error, error)
 	})
 })
 

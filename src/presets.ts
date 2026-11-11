@@ -79,15 +79,16 @@ const globalTalkAlsoReady: PresetFeedback[] = [{ feedbackId: 'connection_ready',
  */
 export function UpdatePresets(self: ModuleInstance): void {
 	const state = self.getCrewLanState()
-	const selectableStatuses = isOffered(state, wireRequests.setEntityStatus) ? self.getSelectableStatuses() : []
+	const settableStatuses = isOffered(state, wireRequests.setEntityStatus) ? self.getSettableStatuses() : []
 	const presets: CompanionPresetDefinitions<ModuleSchema> = {}
-	// The "status_"/"macro_"/"group_"/"indicator_" prefixes keep the generated ids apart from each
+	// The "status_"/"macro_"/"stop_"/"group_"/"indicator_" prefixes keep the generated ids apart from each
 	// other and from the fixed ids below, whatever CrewLAN names a status, a macro, a group or an indicator.
 	const statusPresetIds: string[] = []
 	const macroPresetIds: string[] = []
+	const macroStopPresetIds: string[] = []
 	const indicatorDefinitions: { id: string; type: 'simple'; name: string; presets: string[] }[] = []
 
-	for (const status of selectableStatuses) {
+	for (const status of settableStatuses) {
 		const inactiveStyle = getCompanionStatusButtonStyle(status, false)
 		const activeStyle = getCompanionStatusButtonStyle(status, true)
 		const presetId = `status_${status.id}`
@@ -140,6 +141,9 @@ export function UpdatePresets(self: ModuleInstance): void {
 		}
 	}
 
+	// The Public API v1 has no stop.
+	const stopOffered = state.api === 'v2' && isOffered(state, wireRequests.stopMacro)
+
 	for (const macro of isOffered(state, wireRequests.runMacro) ? self.getRunnableMacros() : []) {
 		const idleStyle = getCompanionMacroButtonStyle(macro, false)
 		const runningStyle = getCompanionMacroButtonStyle(macro, true)
@@ -153,6 +157,21 @@ export function UpdatePresets(self: ModuleInstance): void {
 			states: [{ feedbackId: 'macro_running', options: { macroId: macro.id }, style: runningStyle }],
 			steps: [{ down: [{ actionId: 'run_macro', options: { macroId: macro.id } }], up: [] }],
 		})
+
+		if (stopOffered) {
+			// Lit while the macro runs, which is when there is a run to stop.
+			const text = `Stop\n${macro.label}`
+			const stopId = `stop_${macro.id}`
+
+			macroStopPresetIds.push(stopId)
+			presets[stopId] = greyedPreset({
+				name: `Macro: ${macro.label} (stop)`,
+				style: { ...idleStyle, text },
+				ready: connectionReady({ ...idleStyle, text }),
+				states: [{ feedbackId: 'macro_running', options: { macroId: macro.id }, style: { ...runningStyle, text } }],
+				steps: [{ down: [{ actionId: 'stop_macro', options: { macroId: macro.id } }], up: [] }],
+			})
+		}
 	}
 
 	// The fixed ids keep their 1.x names: a placed button does not refer to its preset.
@@ -398,6 +417,16 @@ export function UpdatePresets(self: ModuleInstance): void {
 								name: 'Macro Buttons',
 								presets: macroPresetIds,
 							},
+							...(macroStopPresetIds.length > 0
+								? [
+										{
+											id: 'macro-stop-buttons',
+											type: 'simple' as const,
+											name: 'Macro Stop Buttons',
+											presets: macroStopPresetIds,
+										},
+									]
+								: []),
 						],
 					},
 				]

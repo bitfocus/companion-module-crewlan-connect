@@ -66,6 +66,7 @@ function definitionsFor(state: CrewLanState): Record<string, Definition> {
 		getCrewLanState: () => state,
 		isControlOffered: () => true,
 		getStatusChoices: () => [],
+		getIndicatorStatusChoices: () => [],
 		getDefaultStatusChoice: () => '',
 		getMacroChoices: () => [],
 		getDefaultMacroChoice: () => '',

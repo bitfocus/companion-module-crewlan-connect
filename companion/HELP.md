@@ -2,10 +2,10 @@
 
 This module connects Companion to one CrewLAN connection through its CrewLAN Connect token. The
 connection acts for an entity, or for a status indicator. For an entity it can set the entity's
-status, set the status indicators CrewLAN lets it set, dismiss its alerts, run the workspace macros,
-and drive its Intercom: Global Talk, the Output and Input mutes, a Talk and a Mute for every group
-the entity is in, and answering, talking in and hanging up a direct call. For a status indicator it
-sets that indicator's status.
+status, set the status indicators CrewLAN lets it set, dismiss its alerts, run and stop the
+workspace macros, and drive its Intercom: Global Talk, the Output and Input mutes, a Talk and a Mute
+for every group the entity is in, and answering, talking in and hanging up a direct call. For a
+status indicator it sets that indicator's status.
 
 Audio stays in CrewLAN. Companion only controls the Intercom of the entity the token belongs to; it
 sends and receives no audio of its own.
@@ -27,9 +27,10 @@ from one turns grey, and a press on it sends nothing and logs, for example,
 The `target_kind` variable says what the connection acts for: `identity`, an entity, or `indicator`.
 
 Over the Public API v1 — a CrewLAN v1 workspace — the connection keeps statuses, macros, alerts and
-the one Global Talk and Output. Input, the groups and direct calls need a workspace that serves
-`/api/v2`; over v1 their actions change nothing and say so in the connection's log. The _Direct_
-buttons need a CrewLAN whose `/api/v2` reports the direct call; an earlier one shows no call.
+the one Global Talk and Output. Input, the groups, direct calls and stopping a macro need a
+workspace that serves `/api/v2`; over v1 their actions change nothing and say so in the connection's
+log. The _Direct_ buttons need a CrewLAN whose `/api/v2` reports the direct call; an earlier one
+shows no call.
 
 ## Setup
 
@@ -92,10 +93,13 @@ did: they do not turn grey. Drag the preset onto the button again to give it the
 Companion's upgrade scripts cannot add a feedback to a button that is already placed, nor change its
 base style.
 
-**Statuses.** While CrewLAN lets the connection set its entity's status, every selectable CrewLAN
-status becomes a ready-made button in the _Status_ preset section, painted in that status's own colours and lit while it is the current one. The five
-built-in CrewLAN statuses are labelled Ready, Attention, Critical, Standby and Offline regardless
-of the language CrewLAN runs in; your own custom statuses keep their CrewLAN label exactly.
+**Statuses.** While CrewLAN lets the connection set its entity's status, every status CrewLAN lets
+it set the entity to becomes a ready-made button in the _Status_ preset section, painted in that
+status's own colours and lit while it is the current one: the built-in statuses but Offline, the
+statuses for everyone and the entity's own. Another entity's own status, which CrewLAN refuses, is
+offered neither there nor in the _Set My Status_ action. The five built-in CrewLAN statuses are
+labelled Ready, Attention, Critical, Standby and Offline regardless of the language CrewLAN runs
+in; your own custom statuses keep their CrewLAN label exactly.
 
 **Status indicators.** Every status indicator CrewLAN lets this connection set gets a section of
 its own in the _Status Indicators_ preset section, with one button for every status CrewLAN lets it
@@ -110,17 +114,22 @@ sends nothing and logs why.
 
 **Macros.** Every macro CrewLAN publishes as runnable becomes a button in the _Macros_ section. The
 text and colours are the macro's own, the button is dimmed while the macro is idle and fully lit
-while it runs, and pressing it starts the macro. Macros are one-shot: there is no stop, no pause
-and no toggle, and Companion shows no progress or step count. Names, colours, the running state and
-the set of macros all update live. A CrewLAN without macro support simply offers no macro buttons.
+while it runs, and pressing it starts the macro. Over `/api/v2` every such macro also gets a button
+in _Macro Stop Buttons_, which reads Stop above the macro's name and is lit while the macro runs;
+pressing it stops the run, whoever started it. There is no pause, and Companion shows no progress
+or step count. Names, colours, the running state and the set of macros
+all update live. A CrewLAN without macro support simply offers no macro buttons.
 
 **Intercom.** The _Intercom_ section starts with _Global Talk (push)_, which talks while it is held,
 and _Global Talk (latch)_, which talks until it is pressed again. Then the two mutes: _Output
 Mute_, the master mute, which silences every group and every call, and _Input Mute_, the
 microphone. Then, for every group the entity is in, a section of its own, _All_ first — the group
 everybody is in: _‹group›: Talk (push)_, _‹group›: Talk (latch)_ and _‹group›: Mute_, such as _All:
-Talk (push)_. Mute silences that group alone and keeps its level. When the entity joins a group,
-its buttons appear in Companion's preset list by themselves, ready to be placed. A renamed group
+Talk (push)_. Mute silences that group alone and keeps its level. A mute set for the entity
+elsewhere, by another of its connections or by a macro, shows on the Mute button at once; one set in
+the entity's own Client shows at the module's next read, within 30 seconds, or the poll interval
+where you set it longer. When the entity joins a group, its buttons appear in Companion's preset
+list by themselves, ready to be placed. A renamed group
 renames its presets, and a group left or removed takes them away: a button placed from them turns
 grey, and a press on it reports an error. Last comes _Direct_, four buttons for the entity's direct
 call:
@@ -201,7 +210,8 @@ attempt every 30 seconds.
 common cause is that the entity is not currently present in the workspace, which CrewLAN refuses;
 the log line says so, the message is also in the `last_error` variable, and the buttons turn grey.
 A direct call's Talk pressed without an active call is refused (`409 intercom_no_call`), and so is
-_Direct: Answer_ once the call stopped ringing (`409 intercom_not_ringing`). A group's button
+_Direct: Answer_ once the call stopped ringing (`409 intercom_not_ringing`), and a macro's Stop
+while nothing of the macro runs (`409 macro_not_running`). A group's button
 reports an error when the entity is no longer in that group. Action failures never take the connection down.
 
 **Buttons went dark rather than grey.** They were placed from presets of a module before 2.0.0 and
