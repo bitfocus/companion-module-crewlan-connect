@@ -41,6 +41,7 @@ function actions(): { definitions: Record<string, { callback: Callback }>; calls
 		hangUpCall: record('hangUpCall'),
 		runCrewLanMacro: record('runCrewLanMacro'),
 		stopCrewLanMacro: record('stopCrewLanMacro'),
+		pressStopsMacro: (macroId: string) => macroId === 'mac-running',
 		setActionDefinitions: (captured: Record<string, { callback: Callback }>) => {
 			definitions = captured
 		},
@@ -157,6 +158,23 @@ describe('Companion macro actions', () => {
 			['stopCrewLanMacro', 'mac-1'],
 		])
 	})
+
+	it('stops the run on a Run Macro set to stop while it runs where a press stops, and starts it otherwise', async () => {
+		const { definitions, calls } = actions()
+
+		await definitions.run_macro?.callback({ options: { macroId: 'mac-running', stopWhileRunning: true } })
+		await definitions.run_macro?.callback({ options: { macroId: 'mac-1', stopWhileRunning: true } })
+		await definitions.run_macro?.callback({ options: { macroId: 'mac-running' } })
+
+		assert.deepEqual(calls, [
+			['runCrewLanAction', 'Stop Macro'],
+			['stopCrewLanMacro', 'mac-running'],
+			['runCrewLanAction', 'Run Macro'],
+			['runCrewLanMacro', 'mac-1'],
+			['runCrewLanAction', 'Run Macro'],
+			['runCrewLanMacro', 'mac-running'],
+		])
+	})
 })
 
 describe('Companion action placement', () => {
@@ -230,5 +248,29 @@ describe('Companion action placement', () => {
 
 		definitions().stop_macro?.subscribe?.({ id: 'act-1', controlId: 'btn', actionId: 'stop_macro', options: {} })
 		assert.equal(isConnectionReady(instance, 'btn'), false)
+	})
+
+	it('greys a Run Macro set to stop while it runs where the offer withholds the stop, and follows the option', () => {
+		const { instance, definitions } = placedModule([wireRequests.runMacro])
+		const placed = { id: 'act-1', controlId: 'btn', actionId: 'run_macro' }
+
+		definitions().run_macro?.subscribe?.({ ...placed, options: { macroId: 'mac-1', stopWhileRunning: true } })
+		assert.equal(isConnectionReady(instance, 'btn'), false)
+		// An edit re-subscribes the same action without unsubscribing it first.
+		definitions().run_macro?.subscribe?.({ ...placed, options: { macroId: 'mac-1', stopWhileRunning: false } })
+		assert.equal(isConnectionReady(instance, 'btn'), true)
+	})
+
+	it('stops on a Run Macro set to stop while the macro runs, or wherever the offer withholds the stop', () => {
+		const runOnly = placedModule([wireRequests.runMacro]).instance
+		assert.equal(runOnly.pressStopsMacro('mac-1'), true)
+
+		const both = placedModule([wireRequests.runMacro, wireRequests.stopMacro]).instance
+		assert.equal(both.pressStopsMacro('mac-1'), false)
+		;(both as unknown as { updateState(patch: Partial<CrewLanState>): void }).updateState({
+			macros: [{ id: 'mac-1', running: true }] as CrewLanState['macros'],
+		})
+		assert.equal(both.pressStopsMacro(' mac-1 '), true)
+		assert.equal(both.pressStopsMacro('mac-2'), false)
 	})
 })

@@ -3,7 +3,7 @@ import { describe, it } from 'node:test'
 import type { CompanionButtonStyleProps, CompanionPresetDefinitions } from '@companion-module/base'
 import type ModuleInstance from '../src/main.js'
 import type { ModuleSchema } from '../src/main.js'
-import { actionRequests } from '../src/actions.js'
+import { placedRequests } from '../src/actions.js'
 import { wireRequests } from '../src/api-v2.js'
 import { offlineBackgroundColor, offlineTextColor } from '../src/button-style.js'
 import { isOffered, UpdateFeedbacks } from '../src/feedbacks.js'
@@ -122,7 +122,9 @@ function harness(state: CrewLanState): {
 			const preset = controlId === undefined ? undefined : presets?.[controlId]
 			const actions = preset?.type === 'simple' ? preset.steps.flatMap((step) => [...step.down, ...step.up]) : []
 
-			return actions.every((action) => actionRequests[action.actionId].every((wireId) => isOffered(state, wireId)))
+			return actions.every((action) =>
+				placedRequests(action.actionId, action.options).every((wireId) => isOffered(state, wireId)),
+			)
 		},
 		getStatusChoices: () => [],
 		getIndicatorStatusChoices: () => [],
@@ -195,6 +197,7 @@ const groupPresets = (groupId: string) => [
 const v2Presets = [
 	...v1Presets,
 	// The Public API v1 has no stop.
+	'runstop_macro-show',
 	'stop_macro-show',
 	'input_mute_toggle',
 	...groupPresets('everyone'),
@@ -332,6 +335,7 @@ describe('the final look over v2 as the offer says', () => {
 		const lit = [
 			'status_sys-green',
 			'macro_macro-show',
+			'runstop_macro-show',
 			'stop_macro-show',
 			'dismiss_alerts',
 			...v2Presets.filter((id) => id.endsWith('_mute')),
@@ -340,6 +344,18 @@ describe('the final look over v2 as the offer says', () => {
 		for (const id of v2Presets) {
 			assert.equal(isGrey(final[id]), !lit.includes(id), id)
 		}
+	})
+
+	it("greys the Run/Stop and Stop keys where the offer holds the run but withholds the stop, and keeps the run's key", () => {
+		const state = litState('v2')
+		state.requests = everyRequest
+		const built = harness(state)
+		state.requests = everyRequest.filter((wireId) => wireId !== wireRequests.stopMacro)
+		const final = looks(built)
+
+		assert.equal(isGrey(final['runstop_macro-show']), true)
+		assert.equal(isGrey(final['stop_macro-show']), true)
+		assert.equal(isGrey(final['macro_macro-show']), false)
 	})
 
 	it("lights an indicator's key at its status, dims it at another, and greys it where the offer withdrew it", () => {

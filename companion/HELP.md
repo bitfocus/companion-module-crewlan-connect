@@ -115,8 +115,12 @@ sends nothing and logs why.
 **Macros.** Every macro CrewLAN publishes as runnable becomes a button in the _Macros_ section. The
 text and colours are the macro's own, the button is dimmed while the macro is idle and fully lit
 while it runs, and pressing it starts the macro. Over `/api/v2` every such macro also gets a button
-in _Macro Stop Buttons_, which reads Stop above the macro's name and is lit while the macro runs;
-pressing it stops the run, whoever started it. There is no pause, and Companion shows no progress
+in _Macro Run/Stop Buttons_, which works like a macro's tile in CrewLAN: at rest it looks like the
+macro's button and a press starts the macro; while the macro runs it is lit and reads Stop above the
+macro's name, and a press stops the run, whoever started it. A button of your own does the same once
+_Stop while it runs_ is ticked in its _Run Macro_ action; its look stays as you set it. Over
+`/api/v2` every such macro also gets a button in _Macro Stop Buttons_, which reads Stop above the macro's name and is lit
+while the macro runs; pressing it stops the run, whoever started it. There is no pause, and Companion shows no progress
 or step count. Names, colours, the running state and the set of macros
 all update live. A CrewLAN without macro support simply offers no macro buttons.
 

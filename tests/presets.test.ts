@@ -3,6 +3,7 @@ import { describe, it } from 'node:test'
 import type { CompanionPresetDefinitions, CompanionPresetSection } from '@companion-module/base'
 import type ModuleInstance from '../src/main.js'
 import type { ModuleSchema } from '../src/main.js'
+import { wireRequests } from '../src/api-v2.js'
 import { offlineBackgroundColor, offlineTextColor } from '../src/button-style.js'
 import { UpdatePresets } from '../src/presets.js'
 import type { CrewLanState, PublicMacroDto, PublicStatusDto } from '../src/types.js'
@@ -89,7 +90,10 @@ function createMacro(input: Partial<PublicMacroDto>): PublicMacroDto {
 }
 
 describe('Companion macro presets', () => {
-	function build(macros: PublicMacroDto[]): {
+	function build(
+		macros: PublicMacroDto[],
+		state: CrewLanState = presetState(),
+	): {
 		presets: CompanionPresetDefinitions<ModuleSchema>
 		structure: CompanionPresetSection<ModuleSchema>[]
 	} {
@@ -98,7 +102,7 @@ describe('Companion macro presets', () => {
 		const self = {
 			getSettableStatuses: () => [],
 			getRunnableMacros: () => macros,
-			getCrewLanState: () => presetState(),
+			getCrewLanState: () => state,
 			setPresetDefinitions: (
 				structure: CompanionPresetSection<ModuleSchema>[],
 				presets: CompanionPresetDefinitions<ModuleSchema>,
@@ -136,6 +140,41 @@ describe('Companion macro presets', () => {
 		assert.equal(feedback?.style?.bgcolor, 0x0fcf29)
 
 		assert.equal(structure[0]?.id, 'macros')
+	})
+
+	it('adds a Run/Stop key per macro over v2: the macro at rest, Stop above its name while it runs', () => {
+		const state = presetState({ api: 'v2', requests: [wireRequests.runMacro, wireRequests.stopMacro] })
+		const { presets, structure } = build([createMacro({})], state)
+		const preset = presets['runstop_macro-showstart']
+
+		assert.ok(preset)
+		assert.equal(preset.name, 'Macro: Show Start (run/stop)')
+		assert.equal(preset.style.text, 'Show Start')
+
+		const [step] = preset.steps
+		assert.deepEqual(step?.down, [
+			{ actionId: 'run_macro', options: { macroId: 'macro-showstart', stopWhileRunning: true } },
+		])
+
+		const running = preset.feedbacks.find((feedback) => feedback.feedbackId === 'macro_running')
+		assert.deepEqual(running?.options, { macroId: 'macro-showstart' })
+		assert.equal(running?.style?.text, 'Stop\nShow Start')
+		assert.equal(running?.style?.bgcolor, 0x0fcf29)
+
+		const macros = structure.find((section) => section.id === 'macros')
+		assert.deepEqual(
+			macros?.definitions.map((definition) => (typeof definition === 'string' ? definition : definition.id)),
+			['macro-buttons', 'macro-run-stop-buttons', 'macro-stop-buttons'],
+		)
+	})
+
+	it('offers no Run/Stop key where the stop is not offered: over v1, or an offer without it', () => {
+		for (const state of [presetState(), presetState({ api: 'v2', requests: [wireRequests.runMacro] })]) {
+			const { presets } = build([createMacro({})], state)
+
+			assert.equal(presets['runstop_macro-showstart'], undefined)
+			assert.ok(presets['macro_macro-showstart'])
+		}
 	})
 
 	it('offers no macro section when CrewLAN publishes no macros', () => {

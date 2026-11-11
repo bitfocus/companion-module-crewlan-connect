@@ -41,6 +41,8 @@ export type ActionsSchema = {
 	run_macro: {
 		options: {
 			macroId: string
+			// Absent on a key placed before the option existed, which reads as unticked.
+			stopWhileRunning?: boolean
 		}
 	}
 	stop_macro: {
@@ -153,6 +155,21 @@ export function indicatorOption(self: ModuleInstance): CompanionInputFieldDropdo
 }
 
 /**
+ * The requests a placed action sends, as its options say: those `actionRequests` names, and the stop
+ * as well for a *Run Macro* set to stop while it runs, so its key greys where the offer withholds it.
+ */
+export function placedRequests(
+	actionId: keyof ActionsSchema,
+	options: Readonly<Record<string, unknown>>,
+): readonly string[] {
+	if (actionId === 'run_macro' && options.stopWhileRunning === true) {
+		return [...actionRequests.run_macro, wireRequests.stopMacro]
+	}
+
+	return actionRequests[actionId]
+}
+
+/**
  * Tells the module which control holds which action, so a readiness feedback on that control knows
  * the requests its button sends. Companion reports every placed action this way when the module
  * starts and whenever a button is edited.
@@ -165,10 +182,11 @@ function reportPlacement(
 		const definition = definitions[actionId]
 
 		if (definition) {
-			definition.optionsToMonitorForSubscribe = []
+			// Only *Run Macro*'s requests follow an option; re-subscribing overwrites the entry it noted.
+			definition.optionsToMonitorForSubscribe = actionId === 'run_macro' ? ['stopWhileRunning'] : []
 			definition.skipUnsubscribeOnOptionsChange = true
 			definition.subscribe = (action: CompanionActionInfo) =>
-				self.notePlacedAction(action.controlId, action.id, actionRequests[actionId])
+				self.notePlacedAction(action.controlId, action.id, placedRequests(actionId, action.options))
 			definition.unsubscribe = (action: CompanionActionInfo) => self.noteRemovedAction(action.controlId, action.id)
 		}
 	}
@@ -325,11 +343,32 @@ export function UpdateActions(self: ModuleInstance): void {
 		},
 		run_macro: {
 			name: 'Run Macro',
-			description: 'Starts a CrewLAN macro. "Stop Macro" stops its run.',
-			options: [macroOption(self)],
+			description:
+				'Starts a CrewLAN macro. With "Stop while it runs", a press while it runs stops the run instead; otherwise "Stop Macro" stops it.',
+			options: [
+				macroOption(self),
+				{
+					id: 'stopWhileRunning',
+					type: 'checkbox',
+					label: 'Stop while it runs',
+					default: false,
+					tooltip:
+						'A press while the macro runs stops the run, whoever started it. Stopping needs a Workspace serving /api/v2.',
+					disableAutoExpression: true,
+				},
+			],
 			callback: async (event) => {
+				const macroId = String(event.options.macroId ?? '')
+
+				if (event.options.stopWhileRunning === true && self.pressStopsMacro(macroId)) {
+					await self.runCrewLanAction('Stop Macro', async () => {
+						await self.stopCrewLanMacro(macroId)
+					})
+					return
+				}
+
 				await self.runCrewLanAction('Run Macro', async () => {
-					await self.runCrewLanMacro(String(event.options.macroId ?? ''))
+					await self.runCrewLanMacro(macroId)
 				})
 			},
 		},

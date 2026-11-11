@@ -81,10 +81,11 @@ export function UpdatePresets(self: ModuleInstance): void {
 	const state = self.getCrewLanState()
 	const settableStatuses = isOffered(state, wireRequests.setEntityStatus) ? self.getSettableStatuses() : []
 	const presets: CompanionPresetDefinitions<ModuleSchema> = {}
-	// The "status_"/"macro_"/"stop_"/"group_"/"indicator_" prefixes keep the generated ids apart from each
+	// The "status_"/"macro_"/"runstop_"/"stop_"/"group_"/"indicator_" prefixes keep the generated ids apart from each
 	// other and from the fixed ids below, whatever CrewLAN names a status, a macro, a group or an indicator.
 	const statusPresetIds: string[] = []
 	const macroPresetIds: string[] = []
+	const macroRunStopPresetIds: string[] = []
 	const macroStopPresetIds: string[] = []
 	const indicatorDefinitions: { id: string; type: 'simple'; name: string; presets: string[] }[] = []
 
@@ -161,6 +162,18 @@ export function UpdatePresets(self: ModuleInstance): void {
 		if (stopOffered) {
 			// Lit while the macro runs, which is when there is a run to stop.
 			const text = `Stop\n${macro.label}`
+			const runStopId = `runstop_${macro.id}`
+
+			// The Client's macro tile: the macro's own key at rest, and Stop while it runs, a press stopping it.
+			macroRunStopPresetIds.push(runStopId)
+			presets[runStopId] = greyedPreset({
+				name: `Macro: ${macro.label} (run/stop)`,
+				style: idleStyle,
+				ready: connectionReady(idleStyle),
+				states: [{ feedbackId: 'macro_running', options: { macroId: macro.id }, style: { ...runningStyle, text } }],
+				steps: [{ down: [{ actionId: 'run_macro', options: { macroId: macro.id, stopWhileRunning: true } }], up: [] }],
+			})
+
 			const stopId = `stop_${macro.id}`
 
 			macroStopPresetIds.push(stopId)
@@ -417,6 +430,16 @@ export function UpdatePresets(self: ModuleInstance): void {
 								name: 'Macro Buttons',
 								presets: macroPresetIds,
 							},
+							...(macroRunStopPresetIds.length > 0
+								? [
+										{
+											id: 'macro-run-stop-buttons',
+											type: 'simple' as const,
+											name: 'Macro Run/Stop Buttons',
+											presets: macroRunStopPresetIds,
+										},
+									]
+								: []),
 							...(macroStopPresetIds.length > 0
 								? [
 										{

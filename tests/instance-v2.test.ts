@@ -298,6 +298,8 @@ interface Host {
 	instance: ModuleInstance
 	variables: Record<string, unknown>
 	presets: string[]
+	/** The action definitions the module gave Companion, to press as a key does. */
+	actions: Record<string, { callback: (event: { options: Record<string, unknown> }) => Promise<void> }>
 	registrations: number
 	status: string | null
 	logs: string[]
@@ -310,6 +312,7 @@ function createHost(): Host {
 		instance: null as unknown as ModuleInstance,
 		variables: {},
 		presets: [],
+		actions: {},
 		registrations: 0,
 		status: null,
 		logs: [],
@@ -320,7 +323,9 @@ function createHost(): Host {
 		label: 'test',
 		_isInstanceContext: true,
 		saveConfig: () => undefined,
-		setActionDefinitions: () => undefined,
+		setActionDefinitions: (actions: Host['actions']) => {
+			host.actions = actions
+		},
 		setFeedbackDefinitions: () => undefined,
 		setPresetDefinitions: (_structure: unknown, presets: Record<string, unknown>) => {
 			host.presets = Object.keys(presets)
@@ -673,6 +678,27 @@ describe('module against a Workspace serving /api/v2', () => {
 		assert.equal(host.instance.isMacroRunning('mac-1'), true)
 		fake.event('macros.event.macroRunEnded', { macroId: 'mac-1', runId: 'run-10', outcome: 'completed' })
 		await waitFor(() => !host.instance.isMacroRunning('mac-1'), 'the later run to end')
+	})
+
+	it('stops the run on a Run/Stop key while the macro runs, and starts the macro on it at rest', async () => {
+		assert.ok(host.presets.includes('runstop_mac-1'), host.presets.join(','))
+		const press = async () =>
+			host.actions.run_macro?.callback({ options: { macroId: 'mac-1', stopWhileRunning: true } })
+		const runs = bodies(wireRequests.runMacro).length
+		const stops = bodies(wireRequests.stopMacro).length
+		fake.event('macros.event.macroRunStarted', { macroId: 'mac-1', runId: 'run-9' })
+		await waitFor(() => host.instance.isMacroRunning('mac-1'), 'the macro to run')
+
+		await press()
+		assert.equal(bodies(wireRequests.stopMacro).length, stops + 1)
+		assert.equal(bodies(wireRequests.runMacro).length, runs)
+		fake.event('macros.event.macroRunEnded', { macroId: 'mac-1', runId: 'run-10', outcome: 'completed' })
+		await waitFor(() => !host.instance.isMacroRunning('mac-1'), 'the later run to end')
+
+		await press()
+		assert.equal(bodies(wireRequests.runMacro).length, runs + 1)
+		assert.equal(bodies(wireRequests.stopMacro).length, stops + 1)
+		await sleep(200)
 	})
 
 	it('keeps a run event over a snapshot that was asked for before it', async () => {

@@ -551,6 +551,16 @@ export class ModuleInstance extends InstanceBase<ModuleSchema> {
 		return macroId.length > 0 && this.state.macros.some((macro) => macro.id === macroId && macro.running)
 	}
 
+	/**
+	 * Whether a press of a *Run Macro* set to stop while it runs stops the macro `macroId` names rather
+	 * than starting it: while it runs, and wherever the offer withholds the stop. Such a key greys
+	 * without the stop, and the stop's refusal then sends nothing and logs the request CrewLAN does not
+	 * offer, as a press on any grey key does.
+	 */
+	pressStopsMacro(macroId: string): boolean {
+		return this.isMacroRunning(macroId.trim()) || !isOffered(this.state, wireRequests.stopMacro)
+	}
+
 	/** Records that the control `controlId` holds the placed action `actionId`, which sends `requests`. */
 	notePlacedAction(controlId: string, actionId: string, requests: readonly string[]): void {
 		const placed = this.placedRequests.get(controlId) ?? new Map<string, readonly string[]>()
