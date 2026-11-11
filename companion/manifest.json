@@ -11,9 +11,8 @@
 	"bugs": "https://github.com/bitfocus/companion-module-crewlan-connect/issues",
 	"maintainers": [
 		{
-			"name": "Jonas Zitzmann",
-			"email": "info@jonaszitzmann.de",
-			"github": "jonaszitzmann"
+			"name": "CrewLAN",
+			"email": "support@crewlan.com"
 		}
 	],
 	"runtime": {
